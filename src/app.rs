@@ -38,6 +38,7 @@ pub struct Viewer {
     serial_ready: bool,
     video_status: String,
     serial_status: String,
+    error: Option<String>,
     image: Option<Arc<RgbaFrame>>,
     new_frame: Option<Arc<RgbaFrame>>,
     colors: ColorSettings,
@@ -71,6 +72,7 @@ pub struct Viewer {
     toolbar_visible: bool,
     toolbar_rect: Option<egui::Rect>,
     toolbar_last_hover: f64,
+    toolbar_menu_open: bool,
     keyboard: KeyboardReport,
     buttons: u8,
     last_mouse: (f32, f32),
@@ -126,6 +128,7 @@ impl Viewer {
             serial_ready: false,
             video_status: "Disconnected".to_owned(),
             serial_status: "Disconnected".to_owned(),
+            error: None,
             image: None,
             new_frame: None,
             colors: ColorSettings::default(),
@@ -159,6 +162,7 @@ impl Viewer {
             toolbar_visible: true,
             toolbar_rect: None,
             toolbar_last_hover: 0.0,
+            toolbar_menu_open: false,
             keyboard: KeyboardReport::default(),
             buttons: 0,
             last_mouse: (0.5, 0.5),
@@ -217,6 +221,7 @@ impl Viewer {
             return;
         }
         self.device_controls.clear();
+        self.error = None;
         self.device_control_pending = true;
         self.device_control_status = "Reading device controls…".into();
         self.camera = Some(capture::spawn(self.video_path.trim().to_owned()));
@@ -253,6 +258,7 @@ impl Viewer {
         self.connect_after_discovery = false;
         self.discovery_status = "Disconnected".into();
         self.device_controls.clear();
+        self.colors_open = false;
         self.device_control_pending = false;
         self.device_control_status = "Connect video to inspect device controls".into();
         self.clear_input();
@@ -275,16 +281,21 @@ impl Viewer {
     fn poll_disconnect(&mut self) {
         let Some(started) = self.disconnecting else { return; };
         if let Some(result) = self.camera.as_mut().and_then(|camera| camera.worker.finish()) {
+            if let Err(error) = &result { self.report_error(error.clone()); }
             self.video_status = result.err().unwrap_or_else(|| "Disconnected".into());
             self.camera = None;
         }
         if let Some(result) = self.serial.as_mut().and_then(|serial| serial.worker.finish()) {
+            if let Err(error) = &result { self.report_error(error.clone()); }
             self.serial_status = result.err().unwrap_or_else(|| "Disconnected".into());
             self.serial = None;
         }
         if self.camera.is_none() && self.serial.is_none() {
             self.disconnecting = None;
         } else if started.elapsed() >= SHUTDOWN_TIMEOUT {
+            if !self.video_status.contains("still stopping") && !self.serial_status.contains("still stopping") {
+                self.report_error("Devices are still stopping; reconnect is unavailable.".into());
+            }
             if self.camera.is_some() { self.video_status = "Video still stopping; reconnect unavailable".into(); }
             if self.serial.is_some() { self.serial_status = "Serial still stopping; reconnect unavailable".into(); }
         }
@@ -295,6 +306,7 @@ impl Viewer {
         if let Some(port) = self.serial.as_mut() {
             if port.send(report).is_err() {
                 self.serial_status = "USB Serial TX queue full or closed".to_owned();
+                self.report_error(self.serial_status.clone());
                 self.serial_ready = false;
                 self.release_remote();
             }
@@ -325,6 +337,7 @@ impl Viewer {
             if let Some(port) = self.serial.as_mut() {
                 if port.release(mouse).is_err() {
                     self.serial_status = "Could not queue HID release: serial worker closed".into();
+                    self.report_error(self.serial_status.clone());
                 }
             }
         }
@@ -341,7 +354,12 @@ impl Viewer {
                 self.device_control_status = update.message;
                 match update.controls {
                     Ok(controls) => self.device_controls = controls,
-                    Err(error) => { self.device_controls.clear(); self.device_control_status.push_str(&format!("; {error}")); }
+                    Err(error) => {
+                        self.device_controls.clear();
+                        self.device_control_status.push_str(&format!("; {error}"));
+                        let message = self.error.get_or_insert_with(String::new);
+                        if !message.contains(&error) { message.push_str(&format!("{error}\n")); }
+                    }
                 }
             }
             while let Ok(img) = camera.frames.try_recv() {
@@ -360,6 +378,7 @@ impl Viewer {
         // Either worker ending closes both devices and clears held input before manual retry.
         if self.camera.as_ref().is_some_and(|c| c.worker.is_finished()) ||
             self.serial.as_ref().is_some_and(|s| s.worker.is_finished()) {
+            self.report_error("The device connection ended unexpectedly.".into());
             self.disconnect();
             self.poll_disconnect();
             return;
@@ -380,6 +399,7 @@ impl Viewer {
         };
         let Some(directory) = &self.screenshot_directory else {
             self.screenshot_status = "Cannot save screenshot: no absolute HOME directory".into();
+            self.report_error(self.screenshot_status.clone());
             return;
         };
         match screenshot::spawn(frame, format, directory, None) {
@@ -387,18 +407,23 @@ impl Viewer {
                 self.screenshot = Some(job);
                 self.screenshot_status = format!("Saving {} screenshot…", format.extension().to_uppercase());
             }
-            Err(error) => self.screenshot_status = format!("Screenshot failed: {error:#}"),
+            Err(error) => {
+                self.screenshot_status = format!("Screenshot failed: {error:#}");
+                self.report_error(self.screenshot_status.clone());
+            }
         }
     }
 
     fn refresh_screenshot(&mut self) {
         let Some(job) = self.screenshot.as_mut() else { return; };
         let Some(result) = job.worker.finish() else { return; };
+        let failed = result.is_err();
         self.screenshot_status = match result {
             Ok(()) => format!("Screenshot saved: {}", job.path.display()),
             Err(error) => format!("Screenshot failed: {error}"),
         };
         self.screenshot = None;
+        if failed { self.report_error(self.screenshot_status.clone()); }
         if self.area_export_pending { self.finish_area(); }
     }
 
@@ -438,7 +463,11 @@ impl Viewer {
                 self.area_export_pending = true;
                 self.screenshot_status = "Saving selected area…".into();
             }
-            Err(error) => { self.screenshot_status = error.to_string(); self.finish_area(); }
+            Err(error) => {
+                self.screenshot_status = error.to_string();
+                self.report_error(self.screenshot_status.clone());
+                self.finish_area();
+            }
         }
     }
 
@@ -459,7 +488,10 @@ impl Viewer {
                     format!("GPU preset loaded: {}", path.display())
                 }
                 Ok(None) => "No saved GPU preset; using defaults".into(),
-                Err(error) => format!("Using GPU defaults: {error:#}"),
+                Err(error) => {
+                    self.report_error(format!("Could not load GPU preset: {error:#}"));
+                    format!("Using GPU defaults: {error:#}")
+                }
             },
         };
     }
@@ -467,11 +499,15 @@ impl Viewer {
     fn save_colors(&mut self, path: Option<&Path>) {
         let Some(path) = path else {
             self.color_status = "Cannot save: no absolute HOME or XDG_CONFIG_HOME".into();
+            self.report_error(self.color_status.clone());
             return;
         };
         self.color_status = match self.colors.save(path) {
             Ok(()) => format!("GPU preset saved: {}", path.display()),
-            Err(error) => format!("Could not save GPU preset: {error:#}"),
+            Err(error) => {
+                self.report_error(format!("Could not save GPU preset: {error:#}"));
+                format!("Could not save GPU preset: {error:#}")
+            }
         };
     }
 
@@ -528,7 +564,10 @@ impl Viewer {
         if self.device_control_pending || self.disconnecting.is_some() { return; }
         match self.camera.as_ref().map(|camera| camera.control_requests.try_send(request)) {
             Some(Ok(())) => { self.device_control_pending = true; self.device_control_status = "Waiting for device…".into(); }
-            _ => self.device_control_status = "Device controls unavailable; reconnect video".into(),
+            _ => {
+                self.device_control_status = "Device controls unavailable; reconnect video".into();
+                self.report_error(self.device_control_status.clone());
+            }
         }
     }
 
@@ -593,6 +632,62 @@ impl Viewer {
         Self::toolbar_strip(ctx).contains(pos) || self.toolbar_rect.is_some_and(|rect| rect.contains(pos))
     }
 
+    fn report_error(&mut self, error: String) {
+        let message = self.error.get_or_insert_with(String::new);
+        if !message.contains(&error) {
+            if !message.is_empty() { message.push('\n'); }
+            message.push_str(&error);
+        }
+    }
+
+    fn connection_dialog(&mut self, ctx: &egui::Context) {
+        if self.image.is_some() && self.serial_ready && self.disconnecting.is_none() { return; }
+        egui::Modal::new(egui::Id::new("connection_config")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.heading("Connection");
+            ui.add_space(8.0);
+            let busy = self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some();
+            let scanning = self.discovery_rx.is_some();
+            let ready = !self.video_path.is_empty() && !self.serial_path.is_empty();
+            if busy {
+                ui.spinner();
+                ui.label(&self.video_status);
+                ui.label(&self.serial_status);
+                if ui.button("Cancel").clicked() { self.disconnect(); }
+            } else {
+                if scanning {
+                    ui.spinner();
+                    ui.label("Searching for NanoKVM…");
+                } else if ready {
+                    ui.label("NanoKVM is ready to connect.");
+                } else {
+                    ui.label("NanoKVM not found. Check the USB connection and retry.");
+                }
+                ui.small(&self.discovery_status);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!scanning, egui::Button::new("Retry")).clicked() {
+                        self.automatic = true;
+                        self.discover(false);
+                    }
+                    if ui.add_enabled(!scanning && ready, egui::Button::new("Connect")).clicked() { self.connect(); }
+                });
+            }
+        });
+    }
+
+    fn error_dialog(&mut self, ctx: &egui::Context) {
+        if self.error.is_none() { return; }
+        if self.remote || self.mode != InputMode::NonFocus || self.selection.is_some() { self.release_remote(); }
+        self.input_blocked = true;
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("video")));
+        egui::Modal::new(egui::Id::new("error_dialog")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Error");
+            ui.label(self.error.as_deref().unwrap_or_default());
+            if ui.button("OK").clicked() { self.error = None; }
+        });
+    }
+
     fn toolbar(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|input| input.time);
         let strip = Self::toolbar_strip(ctx);
@@ -602,7 +697,8 @@ impl Viewer {
                 matches!(event, egui::Event::PointerMoved(pos) if strip.contains(*pos))));
         let keyboard_focus = ctx.memory(|memory| memory.focused())
             .and_then(|id| ctx.read_response(id)).is_some_and(|response| response.layer_id == layer);
-        if self.toolbar_pinned || hovered || keyboard_focus || (self.toolbar_visible && ctx.input(|input| input.pointer.any_down())) {
+        if self.toolbar_pinned || hovered || keyboard_focus || self.toolbar_menu_open
+            || (self.toolbar_visible && ctx.input(|input| input.pointer.any_down())) {
             self.toolbar_visible = true;
             self.toolbar_last_hover = now;
         } else if now - self.toolbar_last_hover >= 0.7 {
@@ -614,143 +710,137 @@ impl Viewer {
         let blue = egui::Color32::from_rgb(32, 77, 112);
         // Reserve only the reveal strip so showing the bar never resizes the remote image.
         egui::TopBottomPanel::top("toolbar_reveal").exact_height(6.0)
-            .frame(egui::Frame::NONE.fill(blue)).show(ctx, |ui| {
+            .frame(egui::Frame::NONE).show(ctx, |ui| {
                 let rect = ui.max_rect();
-                ui.painter().hline(rect.center().x - 20.0..=rect.center().x + 20.0, rect.center().y,
-                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(175, 210, 235)));
+                let handle = egui::Rect::from_center_size(rect.center(), egui::vec2(80.0, 6.0));
+                ui.painter().rect_filled(handle, 0.0, blue);
                 ui.interact(rect, ui.id().with("reveal"), egui::Sense::hover()).on_hover_text("Show remote desktop toolbar");
             });
         self.toolbar_rect = None;
-        if self.toolbar_visible {
-            let width = (ctx.screen_rect().width() - 32.0).min(1000.0).max(280.0);
-            let response = egui::Area::new(layer.id).order(layer.order).movable(false)
-                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 6.0)).default_width(width)
-                .show(ctx, |ui| {
-                    *ui.visuals_mut() = egui::Visuals::dark();
-                    egui::Frame::NONE.fill(blue).inner_margin(8)
-                        .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 })
-                        .show(ui, |ui| {
-                            ui.set_width(width - 16.0);
-                            ui.horizontal(|ui| {
-                                ui.strong("NanoKVM USB");
-                                ui.separator();
-                                ui.label(format!("{:.0} FPS", self.fps));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.selectable_label(self.toolbar_pinned, "Pin toolbar")
-                                        .on_hover_text("Pinned stays visible. Unpin to hide after leaving the toolbar.").clicked() {
-                                        self.toolbar_pinned = !self.toolbar_pinned;
-                                        self.toolbar_last_hover = now;
-                                    }
-                                });
-                            });
-                            ui.separator();
-                            ui.horizontal_wrapped(|ui| {
-                                let active = self.camera.is_some() || self.serial.is_some();
-                                if ui.add_enabled(!active && self.disconnecting.is_none() && self.discovery_rx.is_none(), egui::Button::new("Connect")).clicked() {
-                                    self.connect();
-                                }
-                                if ui.add_enabled((active || self.discovery_rx.is_some()) && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
-                                    self.disconnect();
-                                }
-                                ui.separator();
-                                let focus_available = self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked
+        if !self.toolbar_visible { return; }
+        self.toolbar_menu_open = false;
+        let width = (ctx.screen_rect().width() - 16.0).min(660.0).max(280.0);
+        let response = egui::Area::new(layer.id).order(layer.order).movable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::Vec2::ZERO).default_width(width)
+            .show(ctx, |ui| {
+                *ui.visuals_mut() = egui::Visuals::dark();
+                ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().button_padding = egui::vec2(5.0, 3.0);
+                let background = ui.painter().add(egui::Shape::Noop);
+                let frame = egui::Frame::NONE.inner_margin(egui::Margin { left: 18, right: 18, top: 4, bottom: 4 })
+                    .show(ui, |ui| {
+                        ui.set_width(width - 36.0);
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(self.toolbar_pinned, "Pin").on_hover_text("Pin toolbar / auto-hide").clicked() {
+                                self.toolbar_pinned = !self.toolbar_pinned;
+                                self.toolbar_last_hover = now;
+                            }
+                            let mode = match self.mode {
+                                InputMode::Focus => "Focus",
+                                InputMode::Pending => "Waiting…",
+                                InputMode::NonFocus => "Non-Focus",
+                            };
+                            let menu = ui.menu_button(mode, |ui| {
+                                self.toolbar_menu_open = true;
+                                let available = self.serial_ready && self.image.is_some() && !self.release_chord_held
+                                    && !(self.right_ctrl && self.right_alt) && !self.input_blocked
                                     && self.shortcuts.as_ref().is_some_and(|s| s.status() == ShortcutStatus::Ready);
-                                if ui.add_enabled(focus_available, egui::Button::new("Focus Mode")).clicked() {
+                                if ui.add_enabled(available, egui::Button::new("Focus Mode")).clicked() {
                                     self.request_focus_mode(ctx);
+                                    ui.close_menu();
                                 }
-                                if ui.selectable_label(self.mode == InputMode::NonFocus, "Non-Focus Mode")
-                                    .on_hover_text("Use normal video interaction with desktop shortcuts available.").clicked() {
-                                    self.release_remote();
-                                }
+                                if ui.button("Non-Focus Mode").clicked() { self.release_remote(); ui.close_menu(); }
                                 if self.remote || self.mode == InputMode::Pending {
-                                    if ui.button("Release input (Right-Ctrl + Right-Alt)").clicked() {
-                                        self.release_remote();
-                                    }
-                                } else if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked, egui::Button::new("▶ Capture input")).clicked() {
+                                    if ui.button("Release input").clicked() { self.release_remote(); ui.close_menu(); }
+                                } else if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held
+                                    && !(self.right_ctrl && self.right_alt) && !self.input_blocked,
+                                    egui::Button::new("Capture input")).clicked() {
                                     self.remote = true;
                                     ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                                    ui.close_menu();
                                 }
-                                if ui.add_enabled(self.remote, egui::Button::new(
-                                    if self.remote_super { "Super: ON" } else { "Super: OFF" }
-                                )).clicked() {
-                                    self.remote_super = !self.remote_super;
-                                    self.keyboard.modifiers = if self.remote_super || self.mapped_meta_held {
-                                        self.keyboard.modifiers | protocol::modifiers::LEFT_SUPER
-                                    } else {
-                                        self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER
-                                    };
-                                    self.send_keyboard();
-                                    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                                ui.small(&self.mode_status);
+                                ui.small("Right-Ctrl + Right-Alt releases input.");
+                            });
+                            menu.response.on_hover_text(&self.mode_status);
+                            ui.separator();
+                            for (index, format, label) in [(0, Format::Png, "PNG"), (1, Format::WebP, "WebP")] {
+                                let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(label))
+                                    .on_hover_text("Save the complete video at native resolution, before GPU tuning. WebP is lossless.");
+                                self.screenshot_buttons[index] = Some(response.id);
+                                if response.clicked() { self.take_screenshot(format); }
+                            }
+                            if self.selection.is_some() {
+                                let response = ui.button("Cancel selection");
+                                self.area_cancel_button = Some(response.id);
+                                if response.clicked() { self.finish_area(); self.screenshot_status = "Area selection cancelled".into(); }
+                            } else {
+                                for (index, format, label) in [(0, Format::Png, "Area PNG"), (1, Format::WebP, "Area WebP")] {
+                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
+                                        .on_hover_text("Select part of a frozen video frame. Remote mouse pauses until capture finishes.");
+                                    self.area_buttons[index] = Some(response.id);
+                                    if response.clicked() { self.start_area(format); }
                                 }
-                                if ui.checkbox(&mut self.map_f12_to_meta, "F12 → Meta")
-                                    .on_hover_text("Hold F12 for remote Meta while video has keyboard focus. Turn off to send F12 normally. The Super toggle can also hold Meta.")
-                                    .changed() {
-                                    self.release_held_input();
-                                }
+                            }
+                            ui.menu_button("…", |ui| {
+                                self.toolbar_menu_open = true;
                                 if ui.button("Color").clicked() {
                                     self.release_remote();
                                     self.colors_open = !self.colors_open;
+                                    ui.close_menu();
                                 }
-                                if ui.button(if self.fullscreen { "Windowed" } else { "Fullscreen" }).clicked() {
+                                if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held
+                                    && !(self.right_ctrl && self.right_alt) && !self.input_blocked, egui::Button::new(
+                                    if self.remote_super { "Super: ON" } else { "Super: OFF" })).clicked() {
+                                    self.remote_super = !self.remote_super;
+                                    self.keyboard.modifiers = if self.remote_super || self.mapped_meta_held {
+                                        self.keyboard.modifiers | protocol::modifiers::LEFT_SUPER
+                                    } else { self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER };
+                                    self.remote = true;
+                                    self.send_keyboard();
+                                    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                                    ui.close_menu();
+                                }
+                                if ui.checkbox(&mut self.map_f12_to_meta, "F12 → Meta")
+                                    .on_hover_text("Hold F12 for remote Meta. Turn off to send F12 normally.").changed() {
+                                    self.release_held_input();
+                                }
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let active = self.camera.is_some() || self.serial.is_some();
+                                let disconnect = ui.add_enabled(active && self.disconnecting.is_none(), egui::Button::new("×"))
+                                    .on_hover_text("Disconnect");
+                                disconnect.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, disconnect.enabled(), "Disconnect"));
+                                if disconnect.clicked() { self.disconnect(); }
+                                let fullscreen_label = if self.fullscreen { "Windowed" } else { "Fullscreen" };
+                                let fullscreen = ui.button(if self.fullscreen { "❐" } else { "□" }).on_hover_text(fullscreen_label);
+                                fullscreen.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, fullscreen_label));
+                                if fullscreen.clicked() {
                                     self.fullscreen = !self.fullscreen;
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                                 }
-                                for (index, format, label) in [(0, Format::Png, "Screenshot PNG"), (1, Format::WebP, "Screenshot WebP")] {
-                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(label))
-                                        .on_hover_text("Save the complete remote video at native resolution, before GPU tuning, without toolbar or borders. WebP is lossless.");
-                                    self.screenshot_buttons[index] = Some(response.id);
-                                    if response.clicked() { self.take_screenshot(format); }
-                                }
-                                if self.selection.is_some() {
-                                    let response = ui.button("Cancel selection");
-                                    self.area_cancel_button = Some(response.id);
-                                    if response.clicked() { self.finish_area(); self.screenshot_status = "Area selection cancelled".into(); }
-                                } else {
-                                    for (index, format, label) in [(0, Format::Png, "Area PNG"), (1, Format::WebP, "Area WebP")] {
-                                        let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
-                                            .on_hover_text("Select part of a frozen video frame. Remote mouse pauses until capture finishes.");
-                                        self.area_buttons[index] = Some(response.id);
-                                        if response.clicked() { self.start_area(format); }
-                                    }
-                                }
+                                let status = if self.selection.is_some() { "Select area".into() }
+                                    else if self.screenshot.is_some() { "Saving…".into() }
+                                    else if self.image.is_some() && self.serial_ready { format!("{:.0} FPS", self.fps) }
+                                    else { "Offline".into() };
+                                ui.small(status).on_hover_text(format!("{}\n{}\n{}", self.video_status, self.serial_status, self.screenshot_status));
                             });
                         });
-                });
-            self.toolbar_rect = Some(response.response.rect);
-            // Mouse actions should not leave hidden keyboard focus on toolbar buttons.
-            if ctx.input(|input| input.pointer.any_released()) {
-                if let Some(id) = ctx.memory(|memory| memory.focused()) {
-                    if ctx.read_response(id).is_some_and(|response| response.layer_id == layer) {
-                        ctx.memory_mut(|memory| memory.surrender_focus(id));
-                    }
+                    });
+                let rect = frame.response.rect;
+                ui.painter().set(background, egui::Shape::convex_polygon(vec![rect.left_top(), rect.right_top(),
+                    rect.right_bottom() - egui::vec2(16.0, 0.0), rect.left_bottom() + egui::vec2(16.0, 0.0)], blue, egui::Stroke::NONE));
+            });
+        self.toolbar_rect = Some(response.response.rect);
+        // Mouse actions should not leave hidden keyboard focus on toolbar buttons.
+        if ctx.input(|input| input.pointer.any_released()) {
+            if let Some(id) = ctx.memory(|memory| memory.focused()) {
+                if ctx.read_response(id).is_some_and(|response| response.layer_id == layer) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(id));
                 }
             }
         }
-        egui::TopBottomPanel::bottom("status")
-            .show(ctx, |ui| {
-                ui.small(&self.mode_status);
-                if !self.screenshot_status.is_empty() { ui.small(&self.screenshot_status); }
-                ui.horizontal_wrapped(|ui| {
-                    ui.small(&self.video_status);
-                    ui.separator();
-                    ui.small(&self.serial_status);
-                    ui.separator();
-                    ui.add_enabled_ui(self.camera.is_none() && self.serial.is_none() && self.discovery_rx.is_none(), |ui| {
-                        if ui.checkbox(&mut self.automatic, "Automatic devices").changed() {
-                            if self.automatic { self.discover(false); }
-                            else { self.discovery_status = "Set both device paths manually".into(); }
-                        }
-                        if self.automatic && ui.button("Rescan").clicked() { self.discover(false); }
-                        ui.add_enabled_ui(!self.automatic, |ui| {
-                            ui.label("Video:");
-                            ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.video_path));
-                            ui.label("Serial:");
-                            ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.serial_path));
-                        });
-                    });
-                    ui.small(&self.discovery_status);
-                });
-            });
     }
 
     fn render_video(&mut self, ctx: &egui::Context) {
@@ -908,6 +998,7 @@ impl Viewer {
             Err(error) => {
                 self.release_remote();
                 self.mode_status = error.to_string();
+                self.report_error(self.mode_status.clone());
             }
         }
     }
@@ -988,6 +1079,12 @@ impl eframe::App for Viewer {
             }
             if !self.right_ctrl && !self.right_alt { self.release_chord_held = false; }
         }
+        if self.error.is_some() {
+            if self.remote || self.mode != InputMode::NonFocus || self.selection.is_some() { self.release_remote(); }
+            self.input_blocked = true;
+            ctx.memory_mut(|memory| memory.surrender_focus(video_id));
+            return;
+        }
         let local_click = input.events.iter().any(|event| {
             matches!(event, egui::Event::PointerButton { pos, pressed: true, .. }
                 if !self.over_screenshot_button(ctx, *pos) && (self.over_toolbar(ctx, *pos) || !ctx.read_response(video_id).is_some_and(|video|
@@ -1051,6 +1148,8 @@ impl eframe::App for Viewer {
         }
         self.toolbar(ctx);
         self.color_panel(ctx);
+        self.connection_dialog(ctx);
+        self.error_dialog(ctx);
         self.render_video(ctx);
         // Do not busy-spin; native V4L2 decode is on a dedicated thread.
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -1416,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_errors_do_not_release_input_or_hide_connection_status() {
+    fn screenshot_errors_queue_a_prompt_without_hiding_connection_status() {
         let (mut app, ctx, reports) = input_viewer();
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
         app.keyboard.set_key(4, true);
@@ -1437,6 +1536,7 @@ mod tests {
         app.take_screenshot(Format::Png);
         wait_screenshot(&mut app);
         assert!(app.screenshot_status.contains("Screenshot failed: Create screenshot directory"));
+        assert!(app.error.as_deref().unwrap().contains("Create screenshot directory"));
         assert_eq!(std::fs::read(&root).unwrap(), b"not a directory");
         assert!(app.remote && app.keyboard.bytes()[2] == 4);
         assert!(reports.is_empty());
@@ -1585,10 +1685,19 @@ mod tests {
     }
 
     fn toolbar_frame(app: &mut Viewer, ctx: &egui::Context, size: egui::Vec2, time: f64, events: Vec<egui::Event>) -> egui::FullOutput {
+        let time = time.max(ctx.input(|input| input.time));
         let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             time: Some(time), events, ..Default::default() };
         app.raw_input_hook(ctx, &mut raw);
         ctx.run(raw, |ctx| { app.toolbar(ctx); app.render_video(ctx); })
+    }
+
+    fn open_toolbar_menu(app: &mut Viewer, ctx: &egui::Context, size: egui::Vec2, label: &str) {
+        for _ in 0..3 { toolbar_frame(app, ctx, size, 0.0, vec![]); }
+        let output = toolbar_frame(app, ctx, size, 0.0, vec![]);
+        let pos = label_position(&output, label);
+        toolbar_frame(app, ctx, size, 0.0, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
+        for _ in 0..3 { toolbar_frame(app, ctx, size, 0.0, vec![]); }
     }
 
     fn label_position(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
@@ -1601,6 +1710,79 @@ mod tests {
     }
 
     #[test]
+    fn connection_dialog_disables_connect_until_discovery_succeeds_and_hides_when_ready() {
+        let mut app = Viewer::disconnected(Options { video: String::new(), serial: String::new() });
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))), ..Default::default() };
+        for result in [Err("No supported NanoKVM video or serial device found".into()), Ok(detected_pair())] {
+            let ready = result.is_ok();
+            discovery_result(&mut app, false, result);
+            app.refresh_discovery();
+            for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)); }
+            let output = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx));
+            label_position(&output, "Connection");
+            label_position(&output, "Retry");
+            let pos = label_position(&output, "Connect");
+            if !ready {
+                let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
+                let _ = ctx.run(input, |ctx| app.connection_dialog(ctx));
+                assert!(app.discovery_rx.is_none() && app.camera.is_none() && app.serial.is_none());
+                assert!(app.error.is_none(), "not-found belongs in the config dialog");
+            }
+        }
+        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0; 4] }));
+        app.serial_ready = true;
+        let output = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx));
+        assert!(output.shapes.is_empty(), "connected sessions must not show config");
+        app.disconnect();
+        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)); }
+        label_position(&ctx.run(raw, |ctx| app.connection_dialog(ctx)), "Connection");
+    }
+
+    #[test]
+    fn connected_toolbar_is_single_row_without_title_or_bottom_panel() {
+        for width in [640.0, 1920.0] {
+            let (mut app, ctx, _) = input_viewer();
+            let size = egui::vec2(width, 600.0);
+            for _ in 0..3 { toolbar_frame(&mut app, &ctx, size, 0.0, vec![]); }
+            let output = toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
+            let bar = app.toolbar_rect.unwrap();
+            assert!(bar.height() <= 38.0, "toolbar wrapped: {bar:?}");
+            for id in app.screenshot_buttons.iter().chain(app.area_buttons.iter()).flatten() {
+                assert!(bar.contains_rect(ctx.read_response(*id).unwrap().rect));
+            }
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text)
+                if ["NanoKVM USB", "Automatic devices", "Video:", "Serial:"].contains(&text.galley.text()))));
+            let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), ..Default::default() };
+            let _ = ctx.run(raw, |ctx| {
+                app.toolbar(ctx);
+                assert_eq!(ctx.available_rect().bottom(), size.y, "bottom panel still reserves video space");
+            });
+        }
+    }
+
+    #[test]
+    fn error_prompt_releases_input_and_does_not_reappear_after_acknowledgement() {
+        let (mut app, ctx, reports) = input_viewer();
+        hold_input(&mut app);
+        app.report_error("Test failure".into());
+        app.report_error("Test failure".into());
+        assert_eq!(app.error.as_deref(), Some("Test failure"));
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() };
+        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.error_dialog(ctx)); }
+        assert!(!app.remote && app.keyboard.bytes() == [0; 8] && app.buttons == 0);
+        assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+        assert!(reports.is_empty(), "error modal repeatedly released input");
+        let output = ctx.run(raw.clone(), |ctx| app.error_dialog(ctx));
+        let pos = label_position(&output, "OK");
+        let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
+        let _ = ctx.run(input, |ctx| app.error_dialog(ctx));
+        assert!(app.error.is_none());
+        let output = ctx.run(raw, |ctx| app.error_dialog(ctx));
+        assert!(output.shapes.is_empty());
+    }
+
+    #[test]
     fn toolbar_pin_hide_reveal_and_resize_preserve_video_geometry() {
         for (size, fullscreen) in [(egui::vec2(640.0, 480.0), false), (egui::vec2(1920.0, 1080.0), true)] {
             let (mut app, ctx, reports) = input_viewer();
@@ -1608,9 +1790,9 @@ mod tests {
             for time in [0.0, 0.02, 0.04, 0.06] { toolbar_frame(&mut app, &ctx, size, time, vec![]); }
             let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
             let rect = app.toolbar_rect.unwrap();
-            assert!(rect.left() >= 0.0 && rect.right() <= size.x && rect.top() >= 6.0 && rect.bottom() < size.y);
+            assert!(rect.left() >= 0.0 && rect.right() <= size.x && rect.top() >= 0.0 && rect.bottom() < size.y);
             let video = ctx.read_response(egui::Id::new("video")).unwrap().rect;
-            let pin = label_position(&output, "Pin toolbar");
+            let pin = label_position(&output, "Pin");
             toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
             assert!(!app.toolbar_pinned && app.toolbar_visible);
             reports.try_iter().for_each(drop);
@@ -1627,7 +1809,7 @@ mod tests {
             let output = toolbar_frame(&mut app, &ctx, size, 1.3, vec![]);
             assert_eq!(ctx.read_response(egui::Id::new("video")).unwrap().rect, video);
             assert!(reports.is_empty(), "reveal motion must stay local");
-            let pin = label_position(&output, "Pin toolbar");
+            let pin = label_position(&output, "Pin");
             toolbar_frame(&mut app, &ctx, size, 1.4, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
             assert!(app.toolbar_pinned);
             toolbar_frame(&mut app, &ctx, size, 3.0, vec![egui::Event::PointerGone]);
@@ -1636,7 +1818,7 @@ mod tests {
             toolbar_frame(&mut app, &ctx, resized, 3.1, vec![]);
             toolbar_frame(&mut app, &ctx, resized, 3.2, vec![]);
             let rect = app.toolbar_rect.unwrap();
-            assert!(rect.left() >= 0.0 && rect.right() <= resized.x && rect.top() >= 6.0);
+            assert!(rect.left() >= 0.0 && rect.right() <= resized.x && rect.top() >= 0.0);
             app.toolbar_pinned = false;
             let action = app.screenshot_buttons[0].unwrap();
             ctx.memory_mut(|memory| memory.request_focus(action));
@@ -1680,6 +1862,22 @@ mod tests {
     }
 
     #[test]
+    fn open_toolbar_menu_prevents_auto_hide_and_keeps_pointer_local() {
+        let (mut app, ctx, reports) = input_viewer();
+        let size = egui::vec2(640.0, 480.0);
+        open_toolbar_menu(&mut app, &ctx, size, "…");
+        assert!(app.toolbar_menu_open);
+        reports.try_iter().for_each(drop);
+        app.toolbar_pinned = false;
+        let output = toolbar_frame(&mut app, &ctx, size, 2.0, vec![egui::Event::PointerGone]);
+        assert!(app.toolbar_visible && app.toolbar_menu_open);
+        let pos = label_position(&output, "F12 → Meta");
+        toolbar_frame(&mut app, &ctx, size, 2.1, vec![egui::Event::PointerMoved(pos),
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 20.0), modifiers: egui::Modifiers::default() }]);
+        assert!(reports.is_empty(), "menu motion reached the remote host");
+    }
+
+    #[test]
     fn toolbar_unavailable_actions_and_fullscreen_commands() {
         let mut app = viewer();
         let ctx = egui::Context::default();
@@ -1687,13 +1885,13 @@ mod tests {
         toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
         let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
         for id in app.screenshot_buttons.iter().flatten() { assert!(!ctx.read_response(*id).unwrap().enabled()); }
-        for label in ["Focus Mode", "Disconnect", "Area PNG", "Area WebP", "Screenshot PNG", "Screenshot WebP"] {
+        for label in ["×", "Area PNG", "Area WebP", "PNG", "WebP"] {
             let pos = label_position(&output, label);
             toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
             assert_eq!(app.mode, InputMode::NonFocus);
             assert!(app.screenshot.is_none() && app.camera.is_none() && app.serial.is_none());
         }
-        for (label, expected) in [("Fullscreen", true), ("Windowed", false)] {
+        for (label, expected) in [("□", true), ("❐", false)] {
             let output = toolbar_frame(&mut app, &ctx, size, 0.3, vec![]);
             let pos = label_position(&output, label);
             let output = toolbar_frame(&mut app, &ctx, size, 0.4, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
@@ -1714,6 +1912,8 @@ mod tests {
             ..Default::default()
         };
         for label in ["Focus Mode", "Non-Focus Mode"] {
+            let menu = if app.mode == InputMode::Focus { "Focus" } else { "Non-Focus" };
+            open_toolbar_menu(&mut app, &ctx, egui::vec2(1600.0, 700.0), menu);
             let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
             let output = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
             let pos = output.shapes.iter().find_map(|shape| {
@@ -1844,6 +2044,8 @@ mod tests {
     fn mapping_checkbox_releases_held_input_before_switching_behavior() {
         let (mut app, ctx, reports) = input_viewer();
         for enabled in [true, false] {
+            for _ in 0..3 { toolbar_frame(&mut app, &ctx, egui::vec2(1400.0, 600.0), 0.0, vec![]); }
+            if !app.toolbar_menu_open { open_toolbar_menu(&mut app, &ctx, egui::vec2(1400.0, 600.0), "…"); }
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0))),
                 ..Default::default()

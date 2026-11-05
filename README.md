@@ -35,20 +35,22 @@ Use `./nanokvm-rust --help` for CLI usage.
 
 ## Connect and disconnect
 
-The app starts disconnected. Automatic devices scans for the supported NanoKVM USB layout without opening a capture session.
-Select Connect to rescan and start video plus serial. Rescan alone never connects.
+The app starts with a Connection dialog and automatically scans for the supported NanoKVM USB layout.
+Connect stays disabled until a pair is found. Retry rescans without starting a session.
+Select Connect to rescan and start video plus serial. The dialog stays open until video and serial are ready.
+Missing devices remain in the dialog with a USB connection hint and Retry; the app never guesses a pair.
 The viewer requests 1920×1080 MJPG and uses the negotiated dimensions. Serial reports use 57,600 baud.
 
 Automatic pairing supports the [recorded USB identity and topology](DEVICE-IDENTIFICATION.md).
-For ambiguous candidates or unsupported layouts, disable Automatic devices and set both Video and Serial in the status bar.
-CLI device paths also select manual mode. Device paths can change after reconnection; verify them before connecting manually.
+The dialog has no device selector or manual path fields. For unsupported layouts, the existing
+`--video PATH --serial PATH` CLI options still select manual mode. Device paths can change after reconnection; verify them before connecting manually.
 
 Disconnect clears local input and video, stops both workers, and attempts neutral keyboard and mouse reports before serial closes.
 Either worker failing initiates the same cleanup. The app never reconnects automatically.
 After both workers finish, select Connect to retry. Input capture starts disabled after reconnection.
 App exit requests the same cleanup and waits against a shared two-second deadline.
 
-A worker that ignores cancellation keeps Connect unavailable. The status bar reports delayed shutdown after two seconds.
+A worker that ignores cancellation keeps Connect unavailable. An error prompt reports delayed shutdown after two seconds.
 Failed serial writes cannot guarantee remote key release. Successful local writes do not acknowledge remote HID delivery.
 
 ## Keyboard and mouse
@@ -87,25 +89,32 @@ The mapping preference lasts for the application session, including disconnect/r
 Ctrl+C/V/X, physical-key mapping, modifier ordering, and local input isolation have software regression coverage.
 Simulated Wayland protocol tests cover inhibition and cleanup. Live Sway/NanoKVM acceptance remains deferred.
 
-The centered connection bar overlays the video and starts pinned. Pin toolbar toggles pinning for the current application session.
-Unpinning enables auto-hide after 0.7 seconds outside the bar. A six-point strip remains at the top edge.
-Move the pointer into that strip to reveal the bar. Pointer interaction and keyboard focus keep it visible.
-Showing or hiding the bar does not resize the remote image. Controls wrap within smaller windows.
-Fullscreen and Windowed change the viewer window; the same reveal strip remains available.
-Mode, connection, and screenshot status stay visible below the video even when the bar hides.
+The centered, title-free connection bar has a straight-edged inverted trapezoid shape and one row of controls.
+Pin toggles pinning for the current application session. Unpinning enables auto-hide after 0.7 seconds outside the bar.
+A narrow handle remains at the top edge. Move the pointer to the top strip to reveal the bar.
+Pointer interaction, keyboard focus, and open toolbar menus keep it visible.
+Showing or hiding the bar does not resize the remote image. The bar fits the minimum 640-point window width.
+The mode menu provides Focus Mode, Non-Focus Mode, and Capture/Release input.
+PNG, WebP, Area PNG, and Area WebP remain directly available, including in Focus Mode.
+The more menu (`…`) contains Color, Super, and F12 → Meta. Opening local menus releases Focus Mode.
+Fullscreen/Windowed and Disconnect use the rightmost buttons, with hover labels.
+The toolbar shows the mode and FPS or capture progress. Hover over the status for video, serial, and screenshot details.
+There is no bottom bar. Disconnect returns to the Connection dialog after cleanup.
+Errors show an acknowledgement prompt and release remote input before local interaction.
+Normal connection and screenshot status updates do not open prompts.
 Screenshot actions are disabled without a frame or while an export is running.
 Area PNG and Area WebP start selection. Cancel selection stops an active selection.
 Opening Color releases input capture. Resume explicitly when finished adjusting colors.
 
 ## Screenshots
 
-Use Screenshot PNG for the primary format or Screenshot WebP for lossless WebP.
+Use PNG for the primary format or WebP for lossless WebP.
 Both save the complete decoded remote video at its native resolution, before GPU tuning.
 Saved images exclude viewer controls, borders, and the local desktop.
 Device-side processing already present in the captured frame remains included.
 
 Files go to ~/Pictures/NanoKVM with timestamp-based names. Existing files are never overwritten.
-The status bar reports the saved path or failure. One export runs at a time without blocking the UI.
+The toolbar status tooltip reports the saved path. Failures also open an error prompt. One export runs at a time without blocking the UI.
 Screenshot clicks preserve existing video keyboard ownership and held keys; local keyboard ownership stays local.
 Disconnect does not change an already requested snapshot.
 
@@ -117,7 +126,7 @@ Selection starts inside the video. Dragging beyond its edges clamps the crop to 
 The crop uses native image pixels, including after window resizing or letterboxing.
 Selection gestures and wheel input stay local. Starting selection releases held remote mouse buttons.
 Keyboard ownership remains unchanged while selecting or saving; remote keys still forward when video owns the keyboard.
-Cancel selection stops without saving. Empty selections and export failures show a status message.
+Cancel selection stops without saving. Empty selections and export failures open an error prompt.
 After saving, cancelling, or failing, mouse forwarding resumes only if Focus Mode remains active.
 In Non-Focus Mode, click video or use Capture input to resume explicitly.
 Releasing input, losing window focus, or disconnecting cancels selection and never restores old capture state.

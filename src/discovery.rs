@@ -102,6 +102,14 @@ mod tests {
     use super::*;
     use std::{os::unix::fs::symlink, sync::atomic::{AtomicUsize, Ordering}};
 
+    #[test]
+    #[ignore = "requires one connected NanoKVM; queries capabilities without streaming or serial I/O"]
+    fn live_single_device_discovery() {
+        let pair = detect().expect("detect the connected NanoKVM");
+        assert!(Path::new(&pair.video).exists() && Path::new(&pair.serial).exists());
+        println!("Detected video={} serial={}", pair.video, pair.serial);
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
