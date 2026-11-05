@@ -247,7 +247,7 @@ impl Viewer {
                 self.serial_status = msg;
             }
         }
-        // A failed partial connection must close the other worker before retrying.
+        // Either worker ending closes both devices and clears held input before manual retry.
         if self.camera.as_ref().is_some_and(|c| c.worker.is_finished()) ||
             self.serial.as_ref().is_some_and(|s| s.worker.is_finished()) {
             self.disconnect();
@@ -555,6 +555,130 @@ mod tests {
         let mut expected = protocol::encode(protocol::SEND_KEYBOARD, &[0; 8]).unwrap();
         expected.extend(protocol::encode(protocol::SEND_MOUSE_ABSOLUTE, &protocol::mouse_absolute(0, 0.5, 0.5, 0)).unwrap());
         assert_eq!(bytes, expected);
+    }
+
+    fn hold_input(app: &mut Viewer) {
+        app.remote = true;
+        app.remote_super = true;
+        app.keyboard.set_key(4, true);
+        app.keyboard.modifiers = 8;
+        app.buttons = 7;
+        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0; 4] }));
+        app.new_frame = app.image.clone();
+    }
+
+    fn assert_input_cleared(app: &Viewer) {
+        assert!(!app.remote && !app.remote_super && !app.serial_ready);
+        assert_eq!(app.keyboard.bytes(), [0; 8]);
+        assert_eq!(app.buttons, 0);
+        assert!(app.image.is_none() && app.new_frame.is_none());
+    }
+
+    #[test]
+    fn video_loss_with_held_input_releases_serial_and_requires_manual_retry() {
+        for cause in ["Video stopped: device removed", "Video stopped: read MJPG video frame (500 ms timeout)"] {
+            let mut app = viewer();
+            let (fail, failure) = bounded(1);
+            let (frame_tx, frames) = bounded(2);
+            let (status_tx, status) = bounded(8);
+            let (resource, closed) = bounded::<()>(1);
+            let worker = Worker::spawn(move |_| {
+                let _owned = (resource, frame_tx, status_tx);
+                failure.recv().unwrap();
+                Err(cause.into())
+            });
+            let (serial, serial_closed, bytes) = serial();
+            app.camera = Some(CameraHandle { frames, status, worker });
+            app.serial = Some(serial);
+            hold_input(&mut app);
+            app.send_keyboard();
+            app.send_pointer(0);
+            let mut held = protocol::encode(protocol::SEND_KEYBOARD, &app.keyboard.bytes()).unwrap();
+            held.extend(protocol::encode(protocol::SEND_MOUSE_ABSOLUTE, &protocol::mouse_absolute(7, 0.5, 0.5, 0)).unwrap());
+            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+            while bytes.lock().unwrap().len() < held.len() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            fail.send(()).unwrap();
+            wait_disconnected(&mut app);
+            assert_input_cleared(&app);
+            assert_eq!(app.video_status, cause);
+            assert!(closed.recv().is_err() && serial_closed.recv().is_err());
+            let written = bytes.lock().unwrap();
+            assert_eq!(&written[..held.len()], held.as_slice());
+            assert_neutral(&written[held.len()..]);
+            app.refresh_messages();
+            assert!(app.camera.is_none() && app.serial.is_none() && app.discovery_rx.is_none());
+            app.connect();
+            assert!(app.camera.is_some() && app.serial.is_some());
+            wait_disconnected(&mut app);
+        }
+    }
+
+    #[test]
+    fn idle_serial_hangup_cleans_held_input_and_manual_recovery_reopens_serial() {
+        use serialport::SerialPort;
+        let mut app = viewer();
+        for _ in 0..2 {
+            let (master, slave) = serialport::TTYPort::pair().unwrap();
+            app.serial_path = slave.name().unwrap();
+            drop(slave);
+            app.connect();
+            let (camera, video_closed) = camera(false);
+            // Replace unavailable V4L2 hardware; serial uses the production open and I/O path.
+            let mut unopened_camera = app.camera.replace(camera).unwrap();
+            unopened_camera.worker.stop();
+            let _ = unopened_camera.worker.wait_until(Instant::now() + SHUTDOWN_TIMEOUT);
+            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+            while !app.serial_ready {
+                app.refresh_messages();
+                assert!(Instant::now() < deadline, "serial did not open: {}", app.serial_status);
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(!app.remote);
+            hold_input(&mut app);
+            drop(master);
+            wait_disconnected(&mut app);
+            assert_input_cleared(&app);
+            assert!(video_closed.recv().is_err());
+            assert!(app.serial_status.contains("Serial connection lost"), "{}", app.serial_status);
+            assert!(app.serial_status.contains("HID release failed"));
+            app.refresh_messages();
+            assert!(app.camera.is_none() && app.serial.is_none() && app.discovery_rx.is_none());
+        }
+    }
+
+    #[test]
+    fn stalled_peer_keeps_cleanup_nonblocking_and_reconnect_disabled() {
+        let mut app = viewer();
+        let (resume, stalled) = bounded::<()>(1);
+        let (frame_tx, frames) = bounded(2);
+        let (status_tx, status) = bounded(8);
+        let worker = Worker::spawn(move |_| {
+            let _owned = (frame_tx, status_tx);
+            let _ = stalled.recv();
+            Ok(())
+        });
+        app.camera = Some(CameraHandle { frames, status, worker });
+        app.serial = Some(serial::spawn(app.serial_path.clone()));
+        hold_input(&mut app);
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while app.disconnecting.is_none() {
+            app.refresh_messages();
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_input_cleared(&app);
+        app.disconnecting = Some(Instant::now() - SHUTDOWN_TIMEOUT);
+        app.refresh_messages();
+        assert!(app.video_status.contains("Video still stopping"));
+        assert!(app.serial_status.contains("Serial open failed"));
+        app.connect();
+        assert!(app.serial.is_none() && app.camera.is_some() && app.disconnecting.is_some());
+        resume.send(()).unwrap();
+        wait_disconnected(&mut app);
+        assert!(app.serial_status.contains("Serial open failed"));
     }
 
     fn discovery_result(app: &mut Viewer, connect: bool, result: Result<DevicePair, String>) {

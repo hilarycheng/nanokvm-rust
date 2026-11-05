@@ -61,9 +61,10 @@ fn release_reports(port: &mut impl Write, mouse: [u8; 7]) -> Result<(), String> 
     }
 }
 
-fn transmit(port: &mut impl Write, rx: &Receiver<Report>, stop: &AtomicBool) -> Result<(), String> {
+fn transmit<W: Write>(port: &mut W, rx: &Receiver<Report>, stop: &AtomicBool, mut check: impl FnMut(&W) -> Result<(), String>) -> Result<(), String> {
     let result = (|| {
         while !stop.load(Ordering::Acquire) {
+            check(port)?;
             let report = match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(report) => report,
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -99,7 +100,10 @@ pub fn spawn(port_path: String) -> SerialHandle {
             .open()
             .map_err(|err| format!("Serial open failed ({port_path}): {err}"))?;
         let _ = status_tx.try_send(format!("Serial connected: {port_path}"));
-        transmit(&mut port, &rx, &stop)
+        transmit(&mut port, &rx, &stop, |port| {
+            // FIONREAD detects a hung-up Linux tty without sending remote input.
+            port.bytes_to_read().map(|_| ()).map_err(|err| format!("Serial connection lost: {err}"))
+        })
     });
     SerialHandle { tx, pending, status_rx, worker }
 }
@@ -114,7 +118,7 @@ pub(crate) mod tests {
         let (status_tx, status_rx) = bounded(8);
         let worker = Worker::spawn(move |stop| {
             let _ = status_tx.try_send("Serial connected: mock".into());
-            transmit(&mut port, &rx, &stop)
+            transmit(&mut port, &rx, &stop, |_| Ok(()))
         });
         SerialHandle { tx, pending, status_rx, worker }
     }
@@ -124,7 +128,7 @@ pub(crate) mod tests {
         let (tx, rx) = bounded(256);
         for _ in 0..256 { tx.send(Report::Keyboard([1; 8])).unwrap(); }
         let mut written = Vec::new();
-        transmit(&mut written, &rx, &AtomicBool::new(true)).unwrap();
+        transmit(&mut written, &rx, &AtomicBool::new(true), |_| Ok(())).unwrap();
         let mut expected = protocol::encode(protocol::SEND_KEYBOARD, &[0; 8]).unwrap();
         expected.extend(protocol::encode(protocol::SEND_MOUSE_ABSOLUTE, &protocol::mouse_absolute(0, 0.5, 0.5, 0)).unwrap());
         assert_eq!(written, expected);
@@ -167,9 +171,27 @@ pub(crate) mod tests {
         }
         let mut port = FailedPort(Vec::new());
         let (_, rx) = bounded(1);
-        assert!(transmit(&mut port, &rx, &AtomicBool::new(true)).is_err());
+        assert!(transmit(&mut port, &rx, &AtomicBool::new(true), |_| Ok(())).is_err());
         assert_eq!(port.0.len(), 2);
         assert_eq!(port.0[0][3], protocol::SEND_KEYBOARD);
         assert_eq!(port.0[1][3], protocol::SEND_MOUSE_ABSOLUTE);
+    }
+
+    #[test]
+    fn input_write_failure_still_attempts_both_releases() {
+        struct FailedPort(Vec<u8>);
+        impl Write for FailedPort {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.push(data[3]);
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        let (tx, rx) = bounded(1);
+        tx.send(Report::Keyboard([1; 8])).unwrap();
+        let mut port = FailedPort(Vec::new());
+        let error = transmit(&mut port, &rx, &AtomicBool::new(false), |_| Ok(())).unwrap_err();
+        assert!(error.contains("Serial write failed") && error.contains("HID release failed"));
+        assert_eq!(port.0, [protocol::SEND_KEYBOARD, protocol::SEND_KEYBOARD, protocol::SEND_MOUSE_ABSOLUTE]);
     }
 }

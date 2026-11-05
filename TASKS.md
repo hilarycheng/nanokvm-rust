@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 6.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 7.
 
 **18 tasks: 6 delivered, 12 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision delivers T-06 automatic discovery for the recorded USB profile, with software checks and manual fallback.
+This revision adds T-07 disconnection checks and manual recovery evidence. T-07 stays open for Focus Mode inhibition integration under T-15.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -20,6 +20,7 @@ Revision 2 reviewed all eight files under `src/`, plus `Cargo.toml`, `build.sh`,
 Revision 3 verifies the release build and existing tests under T-03. GPU rendering and hardware checks remain unverified.
 Revision 4 adds host USB/V4L2 enumeration evidence under T-04; it does not verify streaming or coordinated disconnect behavior.
 Revision 5 adds connection lifecycle software checks; revision 6 adds automatic discovery and pairing software checks.
+Revision 7 verifies unexpected cleanup, idle tty hangup, and manual serial recovery with software checks.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -35,7 +36,7 @@ Historical test results in SCOPE.md remain historical evidence.
 | Microsoft Remote Desktop-style top toolbar; pin, auto-hide, narrow reveal strip | A fixed top panel exists. Pinning, auto-hide, and the reveal strip are absent. | T-16 |
 | Toolbar Disconnect and Fullscreen actions | Fullscreen, Connect, and Disconnect exist. Toolbar styling and modes remain open. | T-05, T-16 |
 | Manual disconnect stops video and serial; clears input; attempts neutral reports before serial closes | Both workers have cancellation and completion tracking. Shutdown bypasses queued input and attempts both neutral reports. | T-05 |
-| Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Worker termination initiates shared cleanup. Full disconnection and recovery acceptance remains under T-07. | T-07 |
+| Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Read/write errors, video wait timeout, and idle tty probe errors initiate shared cleanup. Software checks pass; Focus Mode inhibition integration remains under T-15. | T-07, T-15 |
 | Physical Meta forwarding or another key mapped to remote Meta | Only the on-screen Super toggle exists. | T-10 |
 
 Current behavior conflicts with DESIGN.md in these areas:
@@ -43,7 +44,7 @@ Current behavior conflicts with DESIGN.md in these areas:
 - Escape releases input instead of reaching the remote host; the required right-side release shortcut is absent.
 - Release input disables forwarding; it does not provide the required Non-Focus Mode behavior.
 - The GPU panel advises GPU-only tuning; DESIGN.md permits V4L2 gamma and GPU gamma together.
-- T-05 adds shared worker cleanup. Complete unexpected-disconnection detection and recovery acceptance remains under T-07.
+- T-07 verifies current input cleanup on unexpected disconnection. Focus Mode inhibition cleanup remains unverified until T-15 implements inhibition.
 
 SCOPE.md predates these requirements. Its screenshot-format questions, input terminology, and physical-Meta-only target do not override DESIGN.md.
 T-14 reconciles the remaining documentation after implementation.
@@ -111,6 +112,9 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: attempt neutral HID reports when serial remains available. Report failure never prevents cleanup or freezes the UI.
   - Done: repaired hardware supports manual Connect for both workers. No automatic reconnection or unsupported claim of delivered release occurs.
   - Evidence: software failure checks cover either worker failing, release writes failing, and device loss while inputs remain held. Physical unplug exercises are not required.
+  - Result: [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md#t-07-unexpected-disconnection-and-manual-recovery) records 31 passing tests. Linux pseudo-terminals verify idle serial hangup and manual reopening; injected video failure verifies cleanup after held input was transmitted.
+  - Result: idle serial checks use the existing library's FIONREAD probe without sending input. Video errors include the 500 ms wait limit. Release failures retain their cause and do not prevent cleanup.
+  - Remaining: keep this task open until T-15 implements and verifies Focus Mode inhibition release through the shared cleanup path. Real V4L2 streaming and hardware HID delivery remain unverified.
 
 ## Keyboard, mouse, and modes
 

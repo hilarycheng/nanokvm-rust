@@ -64,7 +64,7 @@ fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sen
         // A timeout exits this stream; retrying next() would requeue an undequeued buffer.
         let next = stream.next();
         if stop.load(Ordering::Acquire) { break; }
-        let (buf, _) = next.context("read MJPG video frame")?;
+        let (buf, _) = next.context("read MJPG video frame (500 ms timeout)")?;
         // Fast reject when UI is not consuming; next decoder loop still uses latest frame.
         if frames.is_full() { continue; }
         match decode_mjpeg(buf) {
