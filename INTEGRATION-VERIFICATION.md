@@ -5,6 +5,7 @@ Source baseline: `5abf129` (T-12). This revision changes documentation only.
 
 Subsequent scope update: the user prioritized software completion and deferred live hardware checks before approving T-15.
 [MODE-VERIFICATION.md](MODE-VERIFICATION.md) supersedes this baseline's missing-mode and inhibition statements.
+[TOOLBAR-VERIFICATION.md](TOOLBAR-VERIFICATION.md) records subsequent toolbar and screenshot integration.
 [TASKS.md](TASKS.md) supplies current delivery status. Results below describe the T-12 source baseline only.
 
 **Historical partial acceptance: T-14 remains open.** Existing regression checks pass, and operating documentation now matches current behavior.

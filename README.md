@@ -6,7 +6,7 @@ Software integration acceptance remains open; see [mode verification](MODE-VERIF
 Live hardware acceptance is deferred at the user's request.
 
 The intended environment is Ubuntu with Sway → NanoKVM USB → Arch Linux with GNOME.
-Focus Mode and Non-Focus Mode are available. The final toolbar, V4L2 image controls, and area screenshots remain pending.
+Focus Mode, Non-Focus Mode, and a pinned/auto-hide toolbar are available. V4L2 image controls and area screenshots remain pending.
 Lower RAM usage than the original application has not been measured. T-13 is deferred at the user's request.
 
 ## Build and start
@@ -87,7 +87,14 @@ The mapping preference lasts for the application session, including disconnect/r
 Ctrl+C/V/X, physical-key mapping, modifier ordering, and local input isolation have software regression coverage.
 Simulated Wayland protocol tests cover inhibition and cleanup. Live Sway/NanoKVM acceptance remains deferred.
 
-Fullscreen and Windowed change the viewer window. The current fixed toolbar has no pinning or auto-hide.
+The centered connection bar overlays the video and starts pinned. Pin toolbar toggles pinning for the current application session.
+Unpinning enables auto-hide after 0.7 seconds outside the bar. A six-point strip remains at the top edge.
+Move the pointer into that strip to reveal the bar. Pointer interaction and keyboard focus keep it visible.
+Showing or hiding the bar does not resize the remote image. Controls wrap within smaller windows.
+Fullscreen and Windowed change the viewer window; the same reveal strip remains available.
+Mode, connection, and screenshot status stay visible below the video even when the bar hides.
+Screenshot actions are disabled without a frame or while an export is running.
+Capture area remains disabled until the area-selection workflow is implemented.
 Opening Color releases input capture. Resume explicitly when finished adjusting colors.
 
 ## Screenshots
@@ -98,13 +105,13 @@ Saved images exclude viewer controls, borders, and the local desktop.
 Device-side processing already present in the captured frame remains included.
 
 Files go to ~/Pictures/NanoKVM with timestamp-based names. Existing files are never overwritten.
-The toolbar reports the saved path or failure. One export runs at a time without blocking the UI.
+The status bar reports the saved path or failure. One export runs at a time without blocking the UI.
 Screenshot clicks preserve existing video keyboard ownership and held keys; local keyboard ownership stays local.
 Disconnect does not change an already requested snapshot.
 
 App exit requests cancellation within the shared shutdown deadline.
 Forced termination during a write can leave a partial new image; existing images remain protected.
-Both formats have software checks in Focus Mode and Non-Focus Mode. Final toolbar integration remains under T-16.
+Both formats have software checks in Focus Mode and Non-Focus Mode, including capture after toolbar auto-hide/reveal.
 Area capture is not implemented and remains under T-18.
 
 ## GPU color controls
@@ -150,7 +157,8 @@ env -u DISPLAY -u WAYLAND_DISPLAY cargo test --release --locked -p egui-winit --
 ```
 
 The [T-14 baseline](INTEGRATION-VERIFICATION.md) maps design requirements to the earlier integration evidence.
-[Mode verification](MODE-VERIFICATION.md) records subsequent T-15 behavior and software checks.
+[Mode verification](MODE-VERIFICATION.md) records T-15 behavior and software checks.
+[Toolbar verification](TOOLBAR-VERIFICATION.md) records T-16 layout, input routing, and screenshot integration.
 It distinguishes automated checks from NanoKVM and Sway hardware checks.
 Recheck the pinned egui-winit patch before upgrading egui/eframe.
 [Scope](SCOPE.md) preserves the original requirements and audit findings with their current status.

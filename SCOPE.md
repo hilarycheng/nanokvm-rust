@@ -22,7 +22,7 @@ Neither the color cause nor Node.js's share of memory overhead has been establis
 | S3 | Disconnect on problems and reconnect manually after recovery | T-05/T-07 coordinate video and serial cleanup, clear input, attempt neutral reports, and permit manual retry. [Lifecycle checks](LIFECYCLE-VERIFICATION.md) pass. | T-15 inhibition cleanup passes software checks. Live integration is deferred; failed writes cannot guarantee remote release. |
 | S4 | Start without connecting | T-05 starts disconnected. Enumeration alone never starts device workers. | Retain behavior during final integration; this does not concern system startup. |
 | S5 | Identify matching video and serial automatically | T-04 inventories the hardware. T-06 matches the supported USB profile and rescans on Connect. [Discovery checks](DISCOVERY-VERIFICATION.md) pass. | Unknown or ambiguous candidates require manual paths. This is not multi-device management. |
-| S6 | Capture images | T-12 exports full native video before GPU tuning as PNG or lossless WebP. [Screenshot checks](SCREENSHOT-VERIFICATION.md) pass. | Both modes pass software checks. Final toolbar and T-18 area selection remain; live capture acceptance is deferred. |
+| S6 | Capture images | T-12 exports full native video before GPU tuning as PNG or lossless WebP. [Screenshot checks](SCREENSHOT-VERIFICATION.md) pass. | Both modes and toolbar auto-hide/reveal pass software checks. T-18 area selection remains; live capture acceptance is deferred. |
 | S7 | Reduce RAM relative to the original viewer | Bounded queues and native workers exist, but no comparable memory baseline exists. | T-13 is deferred at the user's request on 2026-11-05. No memory improvement is claimed. |
 
 ## Decisions replacing historical proposals
@@ -75,5 +75,6 @@ Later work added Cargo.lock, permanent regression tests, and task-specific verif
 T-04 records actual USB/V4L2 enumeration. T-11 records successful RX 6600 offscreen rendering, superseding the unavailable-GPU result for that check.
 Historical test counts in earlier records describe their respective revisions; they are not the current suite size.
 [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md) records the T-14 baseline.
-[MODE-VERIFICATION.md](MODE-VERIFICATION.md) records subsequent T-15 software checks and hardware deferral.
+[MODE-VERIFICATION.md](MODE-VERIFICATION.md) records T-15 software checks and hardware deferral.
+[TOOLBAR-VERIFICATION.md](TOOLBAR-VERIFICATION.md) records T-16 toolbar and full-video screenshot integration.
 NanoKVM streaming, Sway input, natural-color acceptance, and original/Rust RAM comparison remain unverified.

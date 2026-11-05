@@ -52,6 +52,10 @@ pub struct Viewer {
     map_f12_to_meta: bool,
     mapped_meta_held: bool,
     fullscreen: bool,
+    toolbar_pinned: bool,
+    toolbar_visible: bool,
+    toolbar_rect: Option<egui::Rect>,
+    toolbar_last_hover: f64,
     keyboard: KeyboardReport,
     buttons: u8,
     last_mouse: (f32, f32),
@@ -129,6 +133,10 @@ impl Viewer {
             map_f12_to_meta: false,
             mapped_meta_held: false,
             fullscreen: false,
+            toolbar_pinned: true,
+            toolbar_visible: true,
+            toolbar_rect: None,
+            toolbar_last_hover: 0.0,
             keyboard: KeyboardReport::default(),
             buttons: 0,
             last_mouse: (0.5, 0.5),
@@ -429,75 +437,140 @@ impl Viewer {
             });
     }
 
+    fn toolbar_strip(ctx: &egui::Context) -> egui::Rect {
+        let screen = ctx.screen_rect();
+        egui::Rect::from_min_size(screen.min, egui::vec2(screen.width(), 6.0))
+    }
+
+    fn over_toolbar(&self, ctx: &egui::Context, pos: egui::Pos2) -> bool {
+        Self::toolbar_strip(ctx).contains(pos) || self.toolbar_rect.is_some_and(|rect| rect.contains(pos))
+    }
+
     fn toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("rdp_toolbar")
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong("NanoKVM Rust");
-                    let active = self.camera.is_some() || self.serial.is_some();
-                    if ui.add_enabled(!active && self.disconnecting.is_none() && self.discovery_rx.is_none(), egui::Button::new("Connect")).clicked() {
-                        self.connect();
-                    }
-                    if ui.add_enabled((active || self.discovery_rx.is_some()) && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
-                        self.disconnect();
-                    }
-                    ui.separator();
-                    let focus_available = self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked
-                        && self.shortcuts.as_ref().is_some_and(|s| s.status() == ShortcutStatus::Ready);
-                    if ui.add_enabled(focus_available, egui::Button::new("Focus Mode")).clicked() {
-                        self.request_focus_mode(ctx);
-                    }
-                    if ui.selectable_label(self.mode == InputMode::NonFocus, "Non-Focus Mode")
-                        .on_hover_text("Use normal video interaction with desktop shortcuts available.").clicked() {
-                        self.release_remote();
-                    }
-                    if self.remote || self.mode == InputMode::Pending {
-                        if ui.button("Release input (Right-Ctrl + Right-Alt)").clicked() {
-                            self.release_remote();
-                        }
-                    } else if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked, egui::Button::new("▶ Capture input")).clicked() {
-                        self.remote = true;
-                        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
-                    }
-                    if ui.add_enabled(self.remote, egui::Button::new(
-                        if self.remote_super { "Super: ON" } else { "Super: OFF" }
-                    )).clicked() {
-                        self.remote_super = !self.remote_super;
-                        self.keyboard.modifiers = if self.remote_super || self.mapped_meta_held {
-                            self.keyboard.modifiers | protocol::modifiers::LEFT_SUPER
-                        } else {
-                            self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER
-                        };
-                        self.send_keyboard();
-                        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
-                    }
-                    if ui.checkbox(&mut self.map_f12_to_meta, "F12 → Meta")
-                        .on_hover_text("Hold F12 for remote Meta while video has keyboard focus. Turn off to send F12 normally. The Super toggle can also hold Meta.")
-                        .changed() {
-                        self.release_held_input();
-                    }
-                    if ui.button("Color").clicked() {
-                        self.release_remote();
-                        self.colors_open = !self.colors_open;
-                    }
-                    if ui.button(if self.fullscreen { "Windowed" } else { "Fullscreen" }).clicked() {
-                        self.fullscreen = !self.fullscreen;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
-                    }
-                    for (index, format, label) in [(0, Format::Png, "Screenshot PNG"), (1, Format::WebP, "Screenshot WebP")] {
-                        let response = ui.add_enabled(self.screenshot.is_none(), egui::Button::new(label))
-                            .on_hover_text("Save the complete remote video at native resolution, before GPU tuning, without toolbar or borders. WebP is lossless.");
-                        self.screenshot_buttons[index] = Some(response.id);
-                        if response.clicked() { self.take_screenshot(format); }
-                    }
-                    ui.separator();
-                    ui.label(format!("{:.0} FPS", self.fps));
-                });
-                ui.small(&self.mode_status);
-                if !self.screenshot_status.is_empty() { ui.small(&self.screenshot_status); }
+        let now = ctx.input(|input| input.time);
+        let strip = Self::toolbar_strip(ctx);
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("rdp_toolbar"));
+        let hovered = ctx.input(|input| input.pointer.hover_pos()).is_some_and(|pos| self.over_toolbar(ctx, pos))
+            || ctx.input(|input| input.events.iter().any(|event|
+                matches!(event, egui::Event::PointerMoved(pos) if strip.contains(*pos))));
+        let keyboard_focus = ctx.memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id)).is_some_and(|response| response.layer_id == layer);
+        if self.toolbar_pinned || hovered || keyboard_focus || (self.toolbar_visible && ctx.input(|input| input.pointer.any_down())) {
+            self.toolbar_visible = true;
+            self.toolbar_last_hover = now;
+        } else if now - self.toolbar_last_hover >= 0.7 {
+            self.toolbar_visible = false;
+        }
+        self.screenshot_buttons = [None; 2];
+        let blue = egui::Color32::from_rgb(32, 77, 112);
+        // Reserve only the reveal strip so showing the bar never resizes the remote image.
+        egui::TopBottomPanel::top("toolbar_reveal").exact_height(6.0)
+            .frame(egui::Frame::NONE.fill(blue)).show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.painter().hline(rect.center().x - 20.0..=rect.center().x + 20.0, rect.center().y,
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(175, 210, 235)));
+                ui.interact(rect, ui.id().with("reveal"), egui::Sense::hover()).on_hover_text("Show remote desktop toolbar");
             });
+        self.toolbar_rect = None;
+        if self.toolbar_visible {
+            let width = (ctx.screen_rect().width() - 32.0).min(1000.0).max(280.0);
+            let response = egui::Area::new(layer.id).order(layer.order).movable(false)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 6.0)).default_width(width)
+                .show(ctx, |ui| {
+                    *ui.visuals_mut() = egui::Visuals::dark();
+                    egui::Frame::NONE.fill(blue).inner_margin(8)
+                        .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 })
+                        .show(ui, |ui| {
+                            ui.set_width(width - 16.0);
+                            ui.horizontal(|ui| {
+                                ui.strong("NanoKVM USB");
+                                ui.separator();
+                                ui.label(format!("{:.0} FPS", self.fps));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.selectable_label(self.toolbar_pinned, "Pin toolbar")
+                                        .on_hover_text("Pinned stays visible. Unpin to hide after leaving the toolbar.").clicked() {
+                                        self.toolbar_pinned = !self.toolbar_pinned;
+                                        self.toolbar_last_hover = now;
+                                    }
+                                });
+                            });
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui| {
+                                let active = self.camera.is_some() || self.serial.is_some();
+                                if ui.add_enabled(!active && self.disconnecting.is_none() && self.discovery_rx.is_none(), egui::Button::new("Connect")).clicked() {
+                                    self.connect();
+                                }
+                                if ui.add_enabled((active || self.discovery_rx.is_some()) && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
+                                    self.disconnect();
+                                }
+                                ui.separator();
+                                let focus_available = self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked
+                                    && self.shortcuts.as_ref().is_some_and(|s| s.status() == ShortcutStatus::Ready);
+                                if ui.add_enabled(focus_available, egui::Button::new("Focus Mode")).clicked() {
+                                    self.request_focus_mode(ctx);
+                                }
+                                if ui.selectable_label(self.mode == InputMode::NonFocus, "Non-Focus Mode")
+                                    .on_hover_text("Use normal video interaction with desktop shortcuts available.").clicked() {
+                                    self.release_remote();
+                                }
+                                if self.remote || self.mode == InputMode::Pending {
+                                    if ui.button("Release input (Right-Ctrl + Right-Alt)").clicked() {
+                                        self.release_remote();
+                                    }
+                                } else if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked, egui::Button::new("▶ Capture input")).clicked() {
+                                    self.remote = true;
+                                    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                                }
+                                if ui.add_enabled(self.remote, egui::Button::new(
+                                    if self.remote_super { "Super: ON" } else { "Super: OFF" }
+                                )).clicked() {
+                                    self.remote_super = !self.remote_super;
+                                    self.keyboard.modifiers = if self.remote_super || self.mapped_meta_held {
+                                        self.keyboard.modifiers | protocol::modifiers::LEFT_SUPER
+                                    } else {
+                                        self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER
+                                    };
+                                    self.send_keyboard();
+                                    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                                }
+                                if ui.checkbox(&mut self.map_f12_to_meta, "F12 → Meta")
+                                    .on_hover_text("Hold F12 for remote Meta while video has keyboard focus. Turn off to send F12 normally. The Super toggle can also hold Meta.")
+                                    .changed() {
+                                    self.release_held_input();
+                                }
+                                if ui.button("Color").clicked() {
+                                    self.release_remote();
+                                    self.colors_open = !self.colors_open;
+                                }
+                                if ui.button(if self.fullscreen { "Windowed" } else { "Fullscreen" }).clicked() {
+                                    self.fullscreen = !self.fullscreen;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                                }
+                                for (index, format, label) in [(0, Format::Png, "Screenshot PNG"), (1, Format::WebP, "Screenshot WebP")] {
+                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
+                                        .on_hover_text("Save the complete remote video at native resolution, before GPU tuning, without toolbar or borders. WebP is lossless.");
+                                    self.screenshot_buttons[index] = Some(response.id);
+                                    if response.clicked() { self.take_screenshot(format); }
+                                }
+                                ui.add_enabled(false, egui::Button::new("Capture area"))
+                                    .on_disabled_hover_text("Area capture is not available yet.");
+                            });
+                        });
+                });
+            self.toolbar_rect = Some(response.response.rect);
+            // Mouse actions should not leave hidden keyboard focus on toolbar buttons.
+            if ctx.input(|input| input.pointer.any_released()) {
+                if let Some(id) = ctx.memory(|memory| memory.focused()) {
+                    if ctx.read_response(id).is_some_and(|response| response.layer_id == layer) {
+                        ctx.memory_mut(|memory| memory.surrender_focus(id));
+                    }
+                }
+            }
+        }
         egui::TopBottomPanel::bottom("status")
             .show(ctx, |ui| {
+                ui.small(&self.mode_status);
+                if !self.screenshot_status.is_empty() { ui.small(&self.screenshot_status); }
                 ui.horizontal_wrapped(|ui| {
                     ui.small(&self.video_status);
                     ui.separator();
@@ -542,8 +615,11 @@ impl Viewer {
             let response = ui.interact(rect, egui::Id::new("video"), egui::Sense::click_and_drag());
             // egui clears video focus on an outside press before this response is created.
             if self.remote && self.screenshot_keeps_focus { response.request_focus(); }
+            let toolbar_rect = self.toolbar_rect;
+            let strip = Self::toolbar_strip(ctx);
             let pressed = ctx.input(|i| i.events.iter().any(|event|
-                matches!(event, egui::Event::PointerButton { pressed: true, pos, .. } if rect.contains(*pos))));
+                matches!(event, egui::Event::PointerButton { pressed: true, pos, .. }
+                    if rect.contains(*pos) && !strip.contains(*pos) && !toolbar_rect.is_some_and(|bar| bar.contains(*pos)))));
             if self.serial_ready && self.mode != InputMode::Pending && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked && ctx.input(|i| i.focused) && pressed && (response.clicked() || response.is_pointer_button_down_on()) {
                 self.remote = true;
                 response.request_focus();
@@ -558,7 +634,10 @@ impl Viewer {
         let video_rect = video.rect;
         let now = Instant::now();
         let events = ctx.input(|i| i.events.clone());
-        let over_video = |pos| video_rect.contains(pos) && ctx.layer_id_at(pos) == Some(video.layer_id);
+        let toolbar_rect = self.toolbar_rect;
+        let strip = Self::toolbar_strip(ctx);
+        let over_video = |pos| video_rect.contains(pos) && !strip.contains(pos)
+            && !toolbar_rect.is_some_and(|rect| rect.contains(pos)) && ctx.layer_id_at(pos) == Some(video.layer_id);
         let local_drag = ctx.dragged_id().or(ctx.drag_stopped_id()).is_some_and(|id| id != video.id);
         let mut pointer_pos = self.pointer_pos;
         for event in events {
@@ -707,8 +786,8 @@ impl eframe::App for Viewer {
         }
         let local_click = input.events.iter().any(|event| {
             matches!(event, egui::Event::PointerButton { pos, pressed: true, .. }
-                if !self.over_screenshot_button(ctx, *pos) && !ctx.read_response(video_id).is_some_and(|video|
-                    video.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(video.layer_id)))
+                if !self.over_screenshot_button(ctx, *pos) && (self.over_toolbar(ctx, *pos) || !ctx.read_response(video_id).is_some_and(|video|
+                    video.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(video.layer_id))))
         });
         if local_click {
             ctx.memory_mut(|memory| memory.surrender_focus(video_id));
@@ -893,7 +972,11 @@ mod tests {
     fn screenshot_buttons_keep_remote_keyboard_ownership_for_both_formats() {
         let root = std::env::temp_dir().join(format!("nanokvm-screenshot-ui-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        for (remote, video_focus, focus_mode) in [(false, false, false), (true, false, false), (true, true, false), (true, true, true)] {
+        for (remote, video_focus, focus_mode, auto_hide) in [
+            (false, false, false, false), (true, false, false, false),
+            (true, true, false, false), (true, true, true, false),
+            (true, true, false, true), (true, true, true, true),
+        ] {
             for (index, extension) in [(0, "png"), (1, "webp")] {
                 let mut peer = crate::shortcuts::tests::Peer::new();
                 let (mut app, ctx, reports) = input_viewer();
@@ -913,12 +996,21 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0))),
                     ..Default::default()
                 };
-                let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+                for _ in 0..2 { let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); }); }
                 if video_focus {
                     ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
                     app.keyboard.set_key(4, true);
                     app.remote_super = true;
                     app.keyboard.modifiers = protocol::modifiers::LEFT_SUPER;
+                }
+                if auto_hide {
+                    app.toolbar_pinned = false;
+                    toolbar_frame(&mut app, &ctx, egui::vec2(1400.0, 600.0), 1.0, vec![egui::Event::PointerGone]);
+                    assert!(!app.toolbar_visible);
+                    toolbar_frame(&mut app, &ctx, egui::vec2(1400.0, 600.0), 1.1,
+                        vec![egui::Event::PointerMoved(Viewer::toolbar_strip(&ctx).center())]);
+                    toolbar_frame(&mut app, &ctx, egui::vec2(1400.0, 600.0), 1.2, vec![]);
+                    assert!(app.toolbar_visible);
                 }
                 let pos = ctx.read_response(app.screenshot_buttons[index].unwrap()).unwrap().rect.center();
                 for pressed in [true, false] {
@@ -1126,6 +1218,125 @@ mod tests {
         }
     }
 
+    fn toolbar_frame(app: &mut Viewer, ctx: &egui::Context, size: egui::Vec2, time: f64, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            time: Some(time), events, ..Default::default() };
+        app.raw_input_hook(ctx, &mut raw);
+        ctx.run(raw, |ctx| { app.toolbar(ctx); app.render_video(ctx); })
+    }
+
+    fn label_position(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        output.shapes.iter().find_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape {
+                if text.galley.text() == label { return Some(text.pos + egui::vec2(3.0, 3.0)); }
+            }
+            None
+        }).unwrap_or_else(|| panic!("missing toolbar label: {label}"))
+    }
+
+    #[test]
+    fn toolbar_pin_hide_reveal_and_resize_preserve_video_geometry() {
+        for (size, fullscreen) in [(egui::vec2(640.0, 480.0), false), (egui::vec2(1920.0, 1080.0), true)] {
+            let (mut app, ctx, reports) = input_viewer();
+            app.fullscreen = fullscreen;
+            for time in [0.0, 0.02, 0.04, 0.06] { toolbar_frame(&mut app, &ctx, size, time, vec![]); }
+            let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
+            let rect = app.toolbar_rect.unwrap();
+            assert!(rect.left() >= 0.0 && rect.right() <= size.x && rect.top() >= 6.0 && rect.bottom() < size.y);
+            let video = ctx.read_response(egui::Id::new("video")).unwrap().rect;
+            let pin = label_position(&output, "Pin toolbar");
+            toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
+            assert!(!app.toolbar_pinned && app.toolbar_visible);
+            reports.try_iter().for_each(drop);
+            toolbar_frame(&mut app, &ctx, size, 0.4, vec![egui::Event::PointerGone]);
+            assert!(app.toolbar_visible, "hide delay keeps the bar reachable");
+            toolbar_frame(&mut app, &ctx, size, 1.1, vec![]);
+            assert!(!app.toolbar_visible && app.toolbar_rect.is_none());
+            assert!(app.screenshot_buttons.iter().all(Option::is_none));
+            assert_eq!(ctx.read_response(egui::Id::new("video")).unwrap().rect, video);
+            let strip = Viewer::toolbar_strip(&ctx);
+            assert_eq!(strip.height(), 6.0);
+            toolbar_frame(&mut app, &ctx, size, 1.2, vec![egui::Event::PointerMoved(strip.center())]);
+            assert!(app.toolbar_visible);
+            let output = toolbar_frame(&mut app, &ctx, size, 1.3, vec![]);
+            assert_eq!(ctx.read_response(egui::Id::new("video")).unwrap().rect, video);
+            assert!(reports.is_empty(), "reveal motion must stay local");
+            let pin = label_position(&output, "Pin toolbar");
+            toolbar_frame(&mut app, &ctx, size, 1.4, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
+            assert!(app.toolbar_pinned);
+            toolbar_frame(&mut app, &ctx, size, 3.0, vec![egui::Event::PointerGone]);
+            assert!(app.toolbar_visible);
+            let resized = egui::vec2(800.0, 600.0);
+            toolbar_frame(&mut app, &ctx, resized, 3.1, vec![]);
+            toolbar_frame(&mut app, &ctx, resized, 3.2, vec![]);
+            let rect = app.toolbar_rect.unwrap();
+            assert!(rect.left() >= 0.0 && rect.right() <= resized.x && rect.top() >= 6.0);
+            app.toolbar_pinned = false;
+            let action = app.screenshot_buttons[0].unwrap();
+            ctx.memory_mut(|memory| memory.request_focus(action));
+            toolbar_frame(&mut app, &ctx, resized, 4.2, vec![egui::Event::PointerGone]);
+            assert!(app.toolbar_visible, "keyboard-focused controls must remain reachable");
+            ctx.memory_mut(|memory| memory.surrender_focus(action));
+            toolbar_frame(&mut app, &ctx, resized, 5.0, vec![]);
+            assert!(!app.toolbar_visible);
+        }
+    }
+
+    #[test]
+    fn toolbar_overlay_blocks_pointer_and_wheel_on_reveal_and_owned_release() {
+        let (mut app, ctx, reports) = input_viewer();
+        let size = egui::vec2(1000.0, 700.0);
+        toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
+        let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
+        let area = label_position(&output, "Capture area");
+        app.toolbar_pinned = false;
+        toolbar_frame(&mut app, &ctx, size, 1.0, vec![egui::Event::PointerGone]);
+        assert!(!app.toolbar_visible);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        app.remote = true;
+        app.last_mouse = (0.25, 0.75);
+        toolbar_frame(&mut app, &ctx, size, 1.1, vec![
+            egui::Event::PointerMoved(Viewer::toolbar_strip(&ctx).center()),
+            egui::Event::PointerMoved(area), pointer_button(area, true), pointer_button(area, false),
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 20.0), modifiers: egui::Modifiers::default() },
+        ]);
+        assert!(app.toolbar_visible);
+        assert_eq!(app.last_mouse, (0.25, 0.75));
+        assert!(reports.is_empty(), "toolbar gestures reached remote video");
+        assert!(app.screenshot.is_none(), "unavailable area action started an export");
+        app.buttons = 1;
+        toolbar_frame(&mut app, &ctx, size, 1.2, vec![pointer_button(area, false)]);
+        assert!(matches!(reports.try_recv().unwrap(), Report::AbsoluteMouse(bytes)
+            if bytes == protocol::mouse_absolute(0, 0.25, 0.75, 0)));
+        assert_eq!(app.buttons, 0);
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn toolbar_unavailable_actions_and_fullscreen_commands() {
+        let mut app = viewer();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(800.0, 600.0);
+        toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
+        let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
+        for id in app.screenshot_buttons.iter().flatten() { assert!(!ctx.read_response(*id).unwrap().enabled()); }
+        for label in ["Focus Mode", "Disconnect", "Capture area", "Screenshot PNG", "Screenshot WebP"] {
+            let pos = label_position(&output, label);
+            toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
+            assert_eq!(app.mode, InputMode::NonFocus);
+            assert!(app.screenshot.is_none() && app.camera.is_none() && app.serial.is_none());
+        }
+        for (label, expected) in [("Fullscreen", true), ("Windowed", false)] {
+            let output = toolbar_frame(&mut app, &ctx, size, 0.3, vec![]);
+            let pos = label_position(&output, label);
+            let output = toolbar_frame(&mut app, &ctx, size, 0.4, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
+            assert_eq!(app.fullscreen, expected);
+            assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|command|
+                matches!(command, egui::ViewportCommand::Fullscreen(value) if *value == expected)));
+            assert_eq!(Viewer::toolbar_strip(&ctx).height(), 6.0);
+        }
+    }
+
     #[test]
     fn toolbar_switches_modes_without_reusing_held_input() {
         let mut peer = crate::shortcuts::tests::Peer::new();
@@ -1136,6 +1347,7 @@ mod tests {
             ..Default::default()
         };
         for label in ["Focus Mode", "Non-Focus Mode"] {
+            let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
             let output = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
             let pos = output.shapes.iter().find_map(|shape| {
                 if let egui::Shape::Text(text) = &shape.shape {
@@ -1269,6 +1481,7 @@ mod tests {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0))),
                 ..Default::default()
             };
+            let _ = ctx.run(raw.clone(), |ctx| app.toolbar(ctx));
             let output = ctx.run(raw.clone(), |ctx| app.toolbar(ctx));
             let pos = output.shapes.iter().find_map(|shape| {
                 if let egui::Shape::Text(text) = &shape.shape {
