@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 3.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 4.
 
-**18 tasks: 3 delivered, 15 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 4 delivered, 14 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision records T-03 build verification and the generated Cargo.lock. Application source and build configuration remain unchanged.
+This revision records T-04 device evidence and the user's removal of further physical unplug/replug acceptance. Software handling remains required.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -18,6 +18,7 @@ They are not additional requirements attributed to DESIGN.md.
 
 Revision 2 reviewed all eight files under `src/`, plus `Cargo.toml`, `build.sh`, and `.gitignore`.
 Revision 3 verifies the release build and existing tests under T-03. GPU rendering and hardware checks remain unverified.
+Revision 4 adds host USB/V4L2 enumeration evidence under T-04; it does not verify streaming or coordinated disconnect behavior.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -68,12 +69,15 @@ T-14 reconciles the remaining documentation after implementation.
   - Result: [BUILD-VERIFICATION.md](BUILD-VERIFICATION.md) records the successful cached offline release build, matching binaries, executable permissions, both help options, ignore rules, and two build-failure checks.
   - Result: 5/5 protocol tests pass with the generated [Cargo.lock](Cargo.lock). Online registry access failed; hardware and GUI acceptance remain outside this task.
 
-- [ ] **T-04 — Identify the physical NanoKVM device pair**
+- [x] **T-04 — Identify the physical NanoKVM device pair**
   - Basis: supplementary S5. Requires accessible NanoKVM hardware.
   - Touchpoints: USB identity, topology, serial ports, V4L2 nodes, and supported capture formats.
-  - Work: establish evidence linking video and serial to the same device, including after replugging.
-  - Done: record reliable matching attributes and supported formats. Document absent, ambiguous, and multiple-device cases without guessing a pairing.
+  - Work: record the local video/serial candidate, USB identities, shared hub topology, and pairing limits.
+  - Done: record matching attributes and supported formats. Document absent, ambiguous, and multiple-device cases without guessing a pairing.
   - Evidence: hardware enumeration records. This task does not implement discovery or initiate a connection.
+  - Scope adjustment (2026-11-05): the user waived further physical unplug/replug exercises. Software removal/re-enumeration handling remains required under T-05 through T-07.
+  - Result: [DEVICE-IDENTIFICATION.md](DEVICE-IDENTIFICATION.md) records capture `345f:2131`, serial `1a86:7523`, shared hub `1a40:0101`, changed USB device numbers, stable observed identities, and MJPG/YUYV modes.
+  - Limit: this closes the revised inventory scope, not automatic pairing or disconnect implementation. Shared hub ancestry alone does not prove enclosure identity.
 
 ## Connection and cleanup
 
@@ -92,7 +96,7 @@ T-14 reconciles the remaining documentation after implementation.
   - Work: use verified identity and topology to select the matching video and serial devices.
   - Done: one identified NanoKVM needs no manual path selection. Replugging and changed device numbers preserve correct pairing.
   - Done: missing or ambiguous matches show a clear status. Discovery alone never starts streaming or serial I/O.
-  - Evidence: matching checks and hardware replug tests cover absent, single, and ambiguous candidates.
+  - Evidence: software matching checks cover absent, single, multiple, and ambiguous candidates, plus removal and changed device numbers. Physical replug exercises are not required.
 
 - [ ] **T-07 — Clean up unexpected disconnections and support manual recovery**
   - Basis: DESIGN.md unexpected cleanup; supplementary S3. Depends on T-05; discovery is not a cleanup prerequisite.
@@ -101,7 +105,7 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: V4L2 or serial loss clears local input and releases available resources, including Focus Mode inhibition.
   - Done: attempt neutral HID reports when serial remains available. Report failure never prevents cleanup or freezes the UI.
   - Done: repaired hardware supports manual Connect for both workers. No automatic reconnection or unsupported claim of delivered release occurs.
-  - Evidence: failure checks cover either worker failing and release writes failing. Hardware checks include unplugging while inputs remain held.
+  - Evidence: software failure checks cover either worker failing, release writes failing, and device loss while inputs remain held. Physical unplug exercises are not required.
 
 ## Keyboard, mouse, and modes
 
@@ -218,14 +222,14 @@ T-14 reconciles the remaining documentation after implementation.
 | Workstream | Task IDs | Delivered | Open |
 | --- | --- | --- | --- |
 | Initial artifacts | T-01, T-02 | 2 | 0 |
-| Build and device evidence | T-03, T-04 | 1 | 1 |
+| Build and device evidence | T-03, T-04 | 2 | 0 |
 | Connection and cleanup | T-05, T-06, T-07 | 0 | 3 |
 | Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 0 | 4 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 3 | 15 |
+| Total | T-01–T-18 | 4 | 14 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.
