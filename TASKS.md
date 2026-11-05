@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 11.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 12.
 
 **18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision validates T-11 GPU rendering and makes preset persistence safe and visible. T-11 remains open for T-17 combined-panel and natural-color acceptance. T-07 and T-10 still await T-15 integration.
+This revision adds T-12 native-resolution PNG and lossless WebP screenshots before GPU tuning. T-12 remains open for explicit mode and final toolbar acceptance under T-15/T-16. T-07, T-10, and T-11 retain their recorded integration requirements.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -25,12 +25,13 @@ Revision 8 verifies video keyboard ownership, local controls, pointer release, a
 Revision 9 preserves keyboard input before clipboard translation and verifies physical keys and modifier ordering.
 Revision 10 adds optional F12-to-Meta forwarding, release checks, and a toolbar mapping control.
 Revision 11 verifies offscreen rendering on an RX 6600, validates presets, and reports persistence errors in the GPU panel.
+Revision 12 adds asynchronous full-video screenshots with exclusive file creation and retained keyboard ownership.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
 | --- | --- | --- |
 | Native Rust UI with egui/eframe | `main.rs` starts eframe with wgpu; `app.rs` implements the viewer. Hardware acceptance remains open. | T-03, T-14 |
-| Full-screen screenshots, including during Focus Mode; WebP and PNG output | No screenshot action, encoder, or export path exists. | T-12 |
+| Full-screen screenshots, including during Focus Mode; WebP and PNG output | PNG and lossless WebP toolbar actions save native video frames before GPU tuning. Current capture ownership is preserved; explicit Focus Mode acceptance awaits T-15. | T-12, T-15 |
 | Area screenshots; pause remote mouse forwarding; conditional resumption | No selection state or crop workflow exists. | T-18 |
 | Separate V4L2 and GPU panels; concurrent gamma controls; clear guidance | Only a GPU panel exists. `capture.rs` configures capture format but exposes no image controls. | T-11, T-17 |
 | GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | GPU rendering and validated preset persistence pass automated checks. Natural-color and combined-panel acceptance remain open. | T-11, T-17 |
@@ -215,6 +216,11 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: saved images match the selected format and agreed capture behavior. The UI reports the saved location or failure.
   - Done: missing frames and write failures are handled. Existing files are not overwritten silently.
   - Evidence: decode exported files and verify dimensions and pixels. Exercise both formats during Focus Mode and Non-Focus Mode.
+  - Decision (2026-11-05): the user deferred screenshot color tuning. Capture the full decoded remote video at native dimensions before GPU adjustments, excluding toolbar and borders.
+  - Decision (2026-11-05): the user accepted PNG as the primary choice, lossless WebP, and unique files under HOME/Pictures/NanoKVM.
+  - Result: separate toolbar actions snapshot the current frame and save through one background worker. Missing frames, missing HOME, encoding errors, write failures, and filename collisions report status without overwriting files.
+  - Result: [SCREENSHOT-VERIFICATION.md](SCREENSHOT-VERIFICATION.md) records decoded pixel/dimension checks and real egui clicks with capture enabled, disabled, and local keyboard ownership. Screenshot clicks preserve held remote keyboard input and do not forward pointer events.
+  - Remaining: keep this task open until T-15/T-16 verify both explicit modes and the final toolbar. Live NanoKVM/compositor acceptance remains unverified; area selection belongs to T-18.
 
 - [ ] **T-18 — Capture a user-selected area with safe mouse forwarding**
   - Basis: DESIGN.md partial capture and conditional input resumption. Depends on T-09, T-12, and T-15.

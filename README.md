@@ -62,6 +62,19 @@ The setting lasts for the current application session, including disconnect/reco
 
 Release input clears queued input and requests neutral reports while devices remain connected. Disconnect closes both device workers.
 
+## Screenshots
+
+Use Screenshot PNG for the primary format or Screenshot WebP for lossless WebP.
+Both save the complete decoded remote video at its native resolution, before GPU tuning.
+The saved image excludes the viewer toolbar, borders, and local desktop.
+Device-side processing already present in the captured frame remains included.
+
+Files go to ~/Pictures/NanoKVM with timestamp-based names. Existing files are never overwritten.
+The toolbar reports the saved path or failure. One export runs at a time, without blocking the UI.
+Screenshot clicks preserve existing video keyboard ownership and held keys; local keyboard ownership stays local.
+Disconnect does not change an already requested snapshot. App exit requests cancellation and waits within the shared shutdown deadline.
+Explicit Focus Mode and Non-Focus Mode acceptance awaits T-15. Area capture remains under T-18.
+
 ## 調色設定
 
 Color 面板只調整遠端影像。Save preset 儲存至：
@@ -89,7 +102,7 @@ Contrast, Temperature/Tint, and comparison views remain outside this task.
 - Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
 - A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
 - Automatic pairing supports the recorded T-04 USB profile. Multiple candidates and unknown layouts require manual paths.
-- 尚未提供 Screenshot。
+- Full-video PNG/WebP screenshots are available. Area capture and explicit mode acceptance remain pending.
 - 尚未量度原版同 Rust viewer 嘅 RAM 差距。
 
 完整問題及證據見 [SCOPE.md](SCOPE.md)。
@@ -108,6 +121,7 @@ Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LI
 See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
 See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08/T-10 checks, mapping limits, and the native input patch.
 See [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) for current T-11 GPU rendering, preset checks, and remaining acceptance.
+See [SCREENSHOT-VERIFICATION.md](SCREENSHOT-VERIFICATION.md) for T-12 output decisions, file safety, and input ownership checks.
 
 ## Source 分工
 
@@ -116,6 +130,7 @@ See [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) for current T-11 GPU renderin
 | [main.rs](src/main.rs) | CLI 參數及 App 啟動 |
 | [app.rs](src/app.rs) | GUI、輸入狀態、連接操作及設定 |
 | [capture.rs](src/capture.rs) | V4L2 MJPEG 擷取及解碼 |
+| [screenshot.rs](src/screenshot.rs) | Native-frame PNG/WebP export and exclusive file creation |
 | [gpu.rs](src/gpu.rs)、[color.wgsl](src/color.wgsl) | Texture upload、GPU rendering 及調色 |
 | [input.rs](src/input.rs) | Keyboard mapping、modifiers 及影像座標換算 |
 | [protocol.rs](src/protocol.rs) | Serial framing、HID reports 及 protocol tests |

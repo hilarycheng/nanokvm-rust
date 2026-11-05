@@ -2,6 +2,7 @@ use std::{path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
 use crate::worker::SHUTDOWN_TIMEOUT;
 use crate::discovery::{self, DevicePair};
+use crate::screenshot::{self, Format, Screenshot};
 use crossbeam_channel::{bounded, Receiver};
 
 use crate::{capture::{self, CameraHandle, RgbaFrame}, gpu::{ColorSettings, GpuVideo, VideoCallback}, input, protocol::{self, KeyboardReport}, serial::{self, SerialHandle, Report}};
@@ -29,6 +30,11 @@ pub struct Viewer {
     colors: ColorSettings,
     color_status: String,
     colors_open: bool,
+    screenshot: Option<Screenshot>,
+    screenshot_directory: Option<PathBuf>,
+    screenshot_status: String,
+    screenshot_buttons: [Option<egui::Id>; 2],
+    screenshot_keeps_focus: bool,
     remote: bool,
     remote_super: bool,
     map_f12_to_meta: bool,
@@ -86,6 +92,11 @@ impl Viewer {
             colors: ColorSettings::default(),
             color_status: "Using GPU defaults".into(),
             colors_open: false,
+            screenshot: None,
+            screenshot_directory: screenshot::directory(std::env::var_os("HOME").map(PathBuf::from)),
+            screenshot_status: String::new(),
+            screenshot_buttons: [None; 2],
+            screenshot_keeps_focus: false,
             remote: false,
             remote_super: false,
             map_f12_to_meta: false,
@@ -246,6 +257,7 @@ impl Viewer {
     }
 
     fn refresh_messages(&mut self) {
+        self.refresh_screenshot();
         self.refresh_discovery();
         if self.disconnecting.is_some() { self.poll_disconnect(); return; }
         if let Some(camera) = &self.camera {
@@ -276,6 +288,42 @@ impl Viewer {
             self.fps_frames = 0;
             self.fps_clock = Instant::now();
         }
+    }
+
+    fn take_screenshot(&mut self, format: Format) {
+        if self.screenshot.is_some() { return; }
+        let Some(frame) = self.image.clone() else {
+            self.screenshot_status = "Screenshot unavailable: no video frame".into();
+            return;
+        };
+        let Some(directory) = &self.screenshot_directory else {
+            self.screenshot_status = "Cannot save screenshot: no absolute HOME directory".into();
+            return;
+        };
+        match screenshot::spawn(frame, format, directory) {
+            Ok(job) => {
+                self.screenshot = Some(job);
+                self.screenshot_status = format!("Saving {} screenshot…", format.extension().to_uppercase());
+            }
+            Err(error) => self.screenshot_status = format!("Screenshot failed: {error:#}"),
+        }
+    }
+
+    fn refresh_screenshot(&mut self) {
+        let Some(job) = self.screenshot.as_mut() else { return; };
+        let Some(result) = job.worker.finish() else { return; };
+        self.screenshot_status = match result {
+            Ok(()) => format!("Screenshot saved: {}", job.path.display()),
+            Err(error) => format!("Screenshot failed: {error}"),
+        };
+        self.screenshot = None;
+    }
+
+    fn over_screenshot_button(&self, ctx: &egui::Context, pos: egui::Pos2) -> bool {
+        self.screenshot_buttons.iter().flatten().any(|id| {
+            ctx.read_response(*id).is_some_and(|button|
+                button.rect.contains(pos) && ctx.layer_id_at(pos) == Some(button.layer_id))
+        })
     }
 
     fn restore_colors(&mut self, path: Option<&Path>) {
@@ -395,9 +443,16 @@ impl Viewer {
                         self.fullscreen = !self.fullscreen;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                     }
+                    for (index, format, label) in [(0, Format::Png, "Screenshot PNG"), (1, Format::WebP, "Screenshot WebP")] {
+                        let response = ui.add_enabled(self.screenshot.is_none(), egui::Button::new(label))
+                            .on_hover_text("Save the complete remote video at native resolution, before GPU tuning, without toolbar or borders. WebP is lossless.");
+                        self.screenshot_buttons[index] = Some(response.id);
+                        if response.clicked() { self.take_screenshot(format); }
+                    }
                     ui.separator();
                     ui.label(format!("{:.0} FPS", self.fps));
                 });
+                if !self.screenshot_status.is_empty() { ui.small(&self.screenshot_status); }
             });
         egui::TopBottomPanel::bottom("status")
             .show(ctx, |ui| {
@@ -443,6 +498,8 @@ impl Viewer {
                 },
             ));
             let response = ui.interact(rect, egui::Id::new("video"), egui::Sense::click_and_drag());
+            // egui clears video focus on an outside press before this response is created.
+            if self.remote && self.screenshot_keeps_focus { response.request_focus(); }
             let pressed = ctx.input(|i| i.events.iter().any(|event|
                 matches!(event, egui::Event::PointerButton { pressed: true, pos, .. } if rect.contains(*pos))));
             if self.serial_ready && ctx.input(|i| i.focused) && pressed && (response.clicked() || response.is_pointer_button_down_on()) {
@@ -532,6 +589,7 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.screenshot_keeps_focus = false;
         let native = egui_winit::take_keyboard_input(ctx, input.viewport_id);
         if !self.remote { return; }
         let video_id = egui::Id::new("video");
@@ -542,7 +600,7 @@ impl eframe::App for Viewer {
         }
         let local_click = input.events.iter().any(|event| {
             matches!(event, egui::Event::PointerButton { pos, pressed: true, .. }
-                if !ctx.read_response(video_id).is_some_and(|video|
+                if !self.over_screenshot_button(ctx, *pos) && !ctx.read_response(video_id).is_some_and(|video|
                     video.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(video.layer_id)))
         });
         if local_click { ctx.memory_mut(|memory| memory.surrender_focus(video_id)); }
@@ -552,6 +610,8 @@ impl eframe::App for Viewer {
             }
             return;
         }
+        self.screenshot_keeps_focus = input.events.iter().any(|event|
+            matches!(event, egui::Event::PointerButton { pos, .. } if self.over_screenshot_button(ctx, *pos)));
         if native.is_empty() {
             for event in &input.events {
                 if !self.remote { break; }
@@ -596,6 +656,7 @@ impl eframe::App for Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
+        if let Some(job) = &self.screenshot { job.worker.stop(); }
         self.disconnect();
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         if let Some(camera) = &mut self.camera {
@@ -603,6 +664,9 @@ impl Drop for Viewer {
         }
         if let Some(serial) = &mut self.serial {
             if let Err(err) = serial.worker.wait_until(deadline) { eprintln!("{err}"); }
+        }
+        if let Some(job) = &mut self.screenshot {
+            if let Err(err) = job.worker.wait_until(deadline) { eprintln!("Screenshot: {err}"); }
         }
     }
 }
@@ -694,6 +758,103 @@ mod tests {
             assert_eq!(app.colors, expected);
             assert!(app.color_status.contains("use Save preset"));
         }
+    }
+
+    fn wait_screenshot(app: &mut Viewer) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.screenshot.is_some() {
+            app.refresh_screenshot();
+            assert!(Instant::now() < deadline, "screenshot did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn screenshot_buttons_keep_remote_keyboard_ownership_for_both_formats() {
+        let root = std::env::temp_dir().join(format!("nanokvm-screenshot-ui-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        for (remote, video_focus) in [(false, false), (true, false), (true, true)] {
+            for (index, extension) in [(0, "png"), (1, "webp")] {
+                let (mut app, ctx, reports) = input_viewer();
+                app.remote = remote;
+                app.screenshot_directory = Some(root.clone());
+                app.colors = ColorSettings::SOFT_WHITE;
+                let image = Arc::new(RgbaFrame { width: 2, height: 1, rgba: vec![255,255,255,255, 200,80,40,255] });
+                app.image = Some(image.clone());
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0))),
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+                if video_focus {
+                    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                    app.keyboard.set_key(4, true);
+                    app.remote_super = true;
+                    app.keyboard.modifiers = protocol::modifiers::LEFT_SUPER;
+                }
+                let pos = ctx.read_response(app.screenshot_buttons[index].unwrap()).unwrap().rect.center();
+                for pressed in [true, false] {
+                    let mut input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, pressed)], ..raw.clone() };
+                    app.raw_input_hook(&ctx, &mut input);
+                    if video_focus { assert!(app.screenshot_keeps_focus, "lost ownership before egui: {index}, {pressed}"); }
+                    let _ = ctx.run(input, |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+                    assert_eq!(app.remote, remote);
+                    if video_focus {
+                        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("video"))),
+                            "index={index}, pressed={pressed}, focus={:?}, button={:?}",
+                            ctx.memory(|memory| memory.focused()),
+                            ctx.read_response(app.screenshot_buttons[index].unwrap()).map(|response|
+                                (response.rect, response.is_pointer_button_down_on(), response.clicked())));
+                        assert_eq!(app.keyboard.bytes(), [8, 0, 4, 0, 0, 0, 0, 0]);
+                    }
+                    if !video_focus { assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("video")))); }
+                    assert!(reports.is_empty(), "screenshot sent a remote input or release report");
+                }
+                let path = app.screenshot.as_ref().expect("button starts export").path.clone();
+                assert_eq!(path.extension().unwrap(), extension);
+                app.take_screenshot(Format::Png);
+                assert_eq!(app.screenshot.as_ref().unwrap().path, path);
+                // The job owns the clicked frame even when live capture changes or disconnects.
+                app.image = None;
+                wait_screenshot(&mut app);
+                assert!(app.screenshot_status.starts_with("Screenshot saved:"));
+                assert!(app.screenshot_status.contains(path.to_str().unwrap()));
+                let decoded = image::open(&path).unwrap().to_rgba8();
+                assert_eq!(decoded.dimensions(), (2, 1));
+                assert_eq!(decoded.as_raw(), &image.rgba);
+                assert_eq!(app.colors, ColorSettings::SOFT_WHITE);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn screenshot_errors_do_not_release_input_or_hide_connection_status() {
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        app.keyboard.set_key(4, true);
+        app.video_status = "Video connected".into();
+        app.image = None;
+        app.take_screenshot(Format::Png);
+        assert!(app.screenshot_status.contains("no video frame"));
+        assert!(app.screenshot.is_none());
+        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0,0,0,255] }));
+        app.screenshot_directory = None;
+        app.take_screenshot(Format::WebP);
+        assert!(app.screenshot_status.contains("no absolute HOME"));
+        assert!(app.screenshot.is_none());
+        let root = std::env::temp_dir().join(format!("nanokvm-screenshot-error-ui-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::write(&root, b"not a directory").unwrap();
+        app.screenshot_directory = Some(root.clone());
+        app.take_screenshot(Format::Png);
+        wait_screenshot(&mut app);
+        assert!(app.screenshot_status.contains("Screenshot failed: Create screenshot directory"));
+        assert_eq!(std::fs::read(&root).unwrap(), b"not a directory");
+        assert!(app.remote && app.keyboard.bytes()[2] == 4);
+        assert!(reports.is_empty());
+        assert_eq!(app.video_status, "Video connected");
+        std::fs::remove_file(root).unwrap();
     }
 
     fn input_frame(app: &mut Viewer, ctx: &egui::Context, events: Vec<egui::Event>, local_text: &mut String) {

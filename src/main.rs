@@ -5,6 +5,7 @@ mod gpu;
 mod input;
 mod protocol;
 mod serial;
+mod screenshot;
 mod worker;
 
 fn main() -> eframe::Result {
