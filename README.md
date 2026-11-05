@@ -5,6 +5,7 @@
 目前係可編譯嘅 MVP。鍵鼠轉發有已知問題，完整硬件行為尚未驗證。
 
 - [Scope、功能差距及驗證紀錄](SCOPE.md)
+- [工作清單及完成進度](TASKS.md)
 - [Agent 工作規則及 APPROVE 流程](AGENTS.md)
 
 ## 目標環境
@@ -27,6 +28,16 @@
 
 The app starts disconnected. Without CLI paths, Automatic devices scans for the supported NanoKVM USB layout.
 Select Connect to rescan and open video plus serial. Rescan alone never connects.
+
+建置 release binary，並複製到 project root：
+
+```sh
+./build.sh
+```
+
+輸出檔案為 `./nanokvm-rust`。Build artifacts 留喺 `target/`。
+
+亦可直接用 Cargo 執行：
 
 ```sh
 cargo run --release
