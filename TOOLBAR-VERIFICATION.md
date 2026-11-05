@@ -1,6 +1,10 @@
 # T-16 remote desktop toolbar verification
 
 Date: 2026-11-05 (Asia/Hong_Kong).
+Current update: [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md) supersedes the implementation gaps below.
+T-16/T-17/T-18 and combined-panel software checks are complete. The following results remain historical baseline evidence.
+T-13 and live hardware acceptance remain deferred.
+
 
 The user approved T-16 and requested a commit after implementation.
 Software checks remain the acceptance scope; live hardware/compositor checks are deferred.

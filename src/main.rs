@@ -1,6 +1,7 @@
 mod app;
 mod discovery;
 mod capture;
+mod controls;
 mod gpu;
 mod input;
 mod protocol;

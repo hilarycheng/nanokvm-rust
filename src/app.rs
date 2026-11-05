@@ -3,8 +3,9 @@ use eframe::egui;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::shortcuts::{Shortcuts, Status as ShortcutStatus};
 use crate::worker::SHUTDOWN_TIMEOUT;
+use crate::controls::{ImageControl, Request as ControlRequest};
 use crate::discovery::{self, DevicePair};
-use crate::screenshot::{self, Format, Screenshot};
+use crate::screenshot::{self, Format, Screenshot, Region};
 use crossbeam_channel::{bounded, Receiver};
 
 use crate::{capture::{self, CameraHandle, RgbaFrame}, gpu::{ColorSettings, GpuVideo, VideoCallback}, input, protocol::{self, KeyboardReport}, serial::{self, SerialHandle, Report}};
@@ -16,6 +17,13 @@ pub struct Options {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputMode { NonFocus, Pending, Focus }
+
+struct AreaSelection {
+    frame: Arc<RgbaFrame>,
+    format: Format,
+    start: Option<[f32; 2]>,
+    end: Option<[f32; 2]>,
+}
 
 pub struct Viewer {
     camera: Option<CameraHandle>,
@@ -35,11 +43,18 @@ pub struct Viewer {
     colors: ColorSettings,
     color_status: String,
     colors_open: bool,
+    device_controls: Vec<ImageControl>,
+    device_control_status: String,
+    device_control_pending: bool,
     screenshot: Option<Screenshot>,
     screenshot_directory: Option<PathBuf>,
     screenshot_status: String,
     screenshot_buttons: [Option<egui::Id>; 2],
     screenshot_keeps_focus: bool,
+    area_buttons: [Option<egui::Id>; 2],
+    area_cancel_button: Option<egui::Id>,
+    selection: Option<AreaSelection>,
+    area_export_pending: bool,
     remote: bool,
     mode: InputMode,
     shortcuts: Option<Shortcuts>,
@@ -116,11 +131,18 @@ impl Viewer {
             colors: ColorSettings::default(),
             color_status: "Using GPU defaults".into(),
             colors_open: false,
+            device_controls: Vec::new(),
+            device_control_status: "Connect video to inspect device controls".into(),
+            device_control_pending: false,
             screenshot: None,
             screenshot_directory: screenshot::directory(std::env::var_os("HOME").map(PathBuf::from)),
             screenshot_status: String::new(),
             screenshot_buttons: [None; 2],
             screenshot_keeps_focus: false,
+            area_buttons: [None; 2],
+            area_cancel_button: None,
+            selection: None,
+            area_export_pending: false,
             remote: false,
             mode: InputMode::NonFocus,
             shortcuts: None,
@@ -194,6 +216,9 @@ impl Viewer {
             self.video_status = "Set both Video and Serial paths before connecting".into();
             return;
         }
+        self.device_controls.clear();
+        self.device_control_pending = true;
+        self.device_control_status = "Reading device controls…".into();
         self.camera = Some(capture::spawn(self.video_path.trim().to_owned()));
         self.serial = Some(serial::spawn(self.serial_path.trim().to_owned()));
         self.video_status = "Connecting to V4L2…".into();
@@ -202,6 +227,12 @@ impl Viewer {
     }
 
     fn clear_input(&mut self) {
+        if self.selection.take().is_some() {
+            self.new_frame = self.image.clone();
+            self.screenshot_status = "Area selection cancelled".into();
+            self.input_blocked = true;
+        }
+        self.area_export_pending = false;
         if let Some(shortcuts) = &mut self.shortcuts { shortcuts.release(); }
         if self.mode != InputMode::NonFocus {
             self.mode_status = "Non-Focus Mode: desktop shortcuts remain available".into();
@@ -221,6 +252,9 @@ impl Viewer {
         self.discovery_rx = None;
         self.connect_after_discovery = false;
         self.discovery_status = "Disconnected".into();
+        self.device_controls.clear();
+        self.device_control_pending = false;
+        self.device_control_status = "Connect video to inspect device controls".into();
         self.clear_input();
         self.serial_ready = false;
         self.image = None;
@@ -302,9 +336,17 @@ impl Viewer {
         if self.disconnecting.is_some() { self.poll_disconnect(); return; }
         if let Some(camera) = &self.camera {
             while let Ok(msg) = camera.status.try_recv() { self.video_status = msg; }
+            while let Ok(update) = camera.controls.try_recv() {
+                self.device_control_pending = false;
+                self.device_control_status = update.message;
+                match update.controls {
+                    Ok(controls) => self.device_controls = controls,
+                    Err(error) => { self.device_controls.clear(); self.device_control_status.push_str(&format!("; {error}")); }
+                }
+            }
             while let Ok(img) = camera.frames.try_recv() {
                 self.image = Some(img.clone());
-                self.new_frame = Some(img);
+                if self.selection.is_none() { self.new_frame = Some(img); }
                 self.frames_seen += 1;
                 self.fps_frames += 1;
             }
@@ -331,7 +373,7 @@ impl Viewer {
     }
 
     fn take_screenshot(&mut self, format: Format) {
-        if self.screenshot.is_some() { return; }
+        if self.screenshot.is_some() || self.selection.is_some() { return; }
         let Some(frame) = self.image.clone() else {
             self.screenshot_status = "Screenshot unavailable: no video frame".into();
             return;
@@ -340,7 +382,7 @@ impl Viewer {
             self.screenshot_status = "Cannot save screenshot: no absolute HOME directory".into();
             return;
         };
-        match screenshot::spawn(frame, format, directory) {
+        match screenshot::spawn(frame, format, directory, None) {
             Ok(job) => {
                 self.screenshot = Some(job);
                 self.screenshot_status = format!("Saving {} screenshot…", format.extension().to_uppercase());
@@ -357,10 +399,51 @@ impl Viewer {
             Err(error) => format!("Screenshot failed: {error}"),
         };
         self.screenshot = None;
+        if self.area_export_pending { self.finish_area(); }
+    }
+
+    fn start_area(&mut self, format: Format) {
+        if self.screenshot.is_some() || self.selection.is_some() { return; }
+        let Some(frame) = self.image.clone() else { self.screenshot_status = "Screenshot unavailable: no video frame".into(); return; };
+        self.buttons = 0;
+        self.pointer_pos = None;
+        if self.remote { self.send_pointer(0); }
+        self.new_frame = Some(frame.clone());
+        self.selection = Some(AreaSelection { frame, format, start: None, end: None });
+        self.screenshot_status = "Drag an area on the frozen video. Use Cancel selection to stop.".into();
+    }
+
+    fn finish_area(&mut self) {
+        self.selection = None;
+        self.area_export_pending = false;
+        self.new_frame = self.image.clone();
+        self.buttons = 0;
+        self.pointer_pos = None;
+        self.input_blocked = true;
+        if self.mode != InputMode::Focus { self.release_remote(); }
+    }
+
+    fn save_area(&mut self) {
+        let Some(selection) = self.selection.take() else { return; };
+        self.new_frame = self.image.clone();
+        let result = (|| -> anyhow::Result<Screenshot> {
+            let (Some(start), Some(end)) = (selection.start, selection.end) else { anyhow::bail!("Selection is empty; no screenshot saved"); };
+            let region = Region::from_points(selection.frame.width, selection.frame.height, start, end)?;
+            let directory = self.screenshot_directory.as_deref().ok_or_else(|| anyhow::anyhow!("Cannot save screenshot: no absolute HOME directory"))?;
+            screenshot::spawn(selection.frame, selection.format, directory, Some(region))
+        })();
+        match result {
+            Ok(job) => {
+                self.screenshot = Some(job);
+                self.area_export_pending = true;
+                self.screenshot_status = "Saving selected area…".into();
+            }
+            Err(error) => { self.screenshot_status = error.to_string(); self.finish_area(); }
+        }
     }
 
     fn over_screenshot_button(&self, ctx: &egui::Context, pos: egui::Pos2) -> bool {
-        self.screenshot_buttons.iter().flatten().any(|id| {
+        self.screenshot_buttons.iter().chain(self.area_buttons.iter()).chain(std::iter::once(&self.area_cancel_button)).flatten().any(|id| {
             ctx.read_response(*id).is_some_and(|button|
                 button.rect.contains(pos) && ctx.layer_id_at(pos) == Some(button.layer_id))
         })
@@ -399,42 +482,106 @@ impl Viewer {
             .default_width(270.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("GPU Color Tuning");
-                    ui.label("Only the remote video is affected.");
-                    ui.add_space(8.0);
-                    ui.add(egui::Slider::new(&mut self.colors.white, ColorSettings::WHITE)
-                        .text("White peak").fixed_decimals(2))
-                        .on_hover_text("Lower values dim the video, including peak white. 1.00 leaves white unchanged.");
-                    ui.add(egui::Slider::new(&mut self.colors.highlights, ColorSettings::HIGHLIGHTS)
-                        .text("Highlights").fixed_decimals(2))
-                        .on_hover_text("Higher values compress bright tones. 0.00 disables compression; clipped capture detail cannot be recovered.");
-                    ui.add(egui::Slider::new(&mut self.colors.gamma, ColorSettings::GAMMA)
-                        .text("Gamma").fixed_decimals(2))
-                        .on_hover_text("Below 1.00 brightens midtones; above 1.00 darkens them. This applies after device gamma.");
-                    ui.add(egui::Slider::new(&mut self.colors.exposure, ColorSettings::EXPOSURE)
-                        .text("Exposure (EV)").fixed_decimals(2))
-                        .on_hover_text("Adjust linear-light brightness. +1 EV doubles it; -1 EV halves it. Bright values can clip.");
-                    ui.add(egui::Slider::new(&mut self.colors.saturation, ColorSettings::SATURATION)
-                        .text("Saturation").fixed_decimals(2))
-                        .on_hover_text("0.00 gives grayscale, 1.00 preserves color, and higher values boost color intensity.");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset 1:1").on_hover_text("Reset GPU adjustments only. Device controls and the saved preset stay unchanged.").clicked() {
-                            self.colors = ColorSettings::default();
-                            self.color_status = "GPU defaults applied; use Save preset to keep them".into();
-                        }
-                        if ui.button("Soft white").clicked() {
-                            self.colors = ColorSettings::SOFT_WHITE;
-                            self.color_status = "Soft white applied; use Save preset to keep it".into();
-                        }
+                    ui.group(|ui| {
+                        ui.heading("GPU Color Tuning");
+                        ui.label("Only the remote video is affected.");
+                        ui.add_space(8.0);
+                        ui.add(egui::Slider::new(&mut self.colors.white, ColorSettings::WHITE)
+                            .text("White peak").fixed_decimals(2))
+                            .on_hover_text("Lower values dim the video, including peak white. 1.00 leaves white unchanged.");
+                        ui.add(egui::Slider::new(&mut self.colors.highlights, ColorSettings::HIGHLIGHTS)
+                            .text("Highlights").fixed_decimals(2))
+                            .on_hover_text("Higher values compress bright tones. 0.00 disables compression; clipped capture detail cannot be recovered.");
+                        ui.add(egui::Slider::new(&mut self.colors.gamma, ColorSettings::GAMMA)
+                            .text("Gamma").fixed_decimals(2))
+                            .on_hover_text("Below 1.00 brightens midtones; above 1.00 darkens them. This applies after device gamma.");
+                        ui.add(egui::Slider::new(&mut self.colors.exposure, ColorSettings::EXPOSURE)
+                            .text("Exposure (EV)").fixed_decimals(2))
+                            .on_hover_text("Adjust linear-light brightness. +1 EV doubles it; -1 EV halves it. Bright values can clip.");
+                        ui.add(egui::Slider::new(&mut self.colors.saturation, ColorSettings::SATURATION)
+                            .text("Saturation").fixed_decimals(2))
+                            .on_hover_text("0.00 gives grayscale, 1.00 preserves color, and higher values boost color intensity.");
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Reset 1:1").on_hover_text("Reset GPU adjustments only. Device controls and the saved preset stay unchanged.").clicked() {
+                                self.colors = ColorSettings::default();
+                                self.color_status = "GPU defaults applied; use Save preset to keep them".into();
+                            }
+                            if ui.button("Soft white").clicked() {
+                                self.colors = ColorSettings::SOFT_WHITE;
+                                self.color_status = "Soft white applied; use Save preset to keep it".into();
+                            }
+                        });
+                        if ui.button("Save preset").clicked() { self.save_colors(config_path().as_deref()); }
+                        ui.small(&self.color_status);
+                        ui.add_space(10.0);
+                        ui.label("GPU adjustments apply after V4L2 device controls. Both gamma controls can be used together.");
+                        ui.small("GPU presets do not change device settings or desktop colors.");
                     });
-                    if ui.button("Save preset").clicked() { self.save_colors(config_path().as_deref()); }
-                    ui.small(&self.color_status);
-                    ui.add_space(10.0);
-                    ui.label("GPU adjustments apply after V4L2 device controls. Both gamma controls can be used together.");
-                    ui.small("Device controls are not available in this panel. GPU presets do not change device settings or desktop colors.");
+                    ui.add_space(8.0);
+                    ui.group(|ui| self.device_color_panel(ui));
                 });
             });
+    }
+
+    fn request_device_control(&mut self, request: ControlRequest) {
+        if self.device_control_pending || self.disconnecting.is_some() { return; }
+        match self.camera.as_ref().map(|camera| camera.control_requests.try_send(request)) {
+            Some(Ok(())) => { self.device_control_pending = true; self.device_control_status = "Waiting for device…".into(); }
+            _ => self.device_control_status = "Device controls unavailable; reconnect video".into(),
+        }
+    }
+
+    fn device_color_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("V4L2 Device Controls");
+        ui.label("Device processing affects captured video and screenshots before GPU adjustments.");
+        ui.small("Device gamma and GPU gamma can both remain active. GPU Reset and presets affect only the GPU panel.");
+        let enabled = self.camera.is_some() && self.disconnecting.is_none() && !self.device_control_pending;
+        if ui.add_enabled(enabled, egui::Button::new("Refresh device controls")).clicked() {
+            self.request_device_control(ControlRequest::Refresh);
+        }
+        ui.small(&self.device_control_status);
+        if self.device_controls.is_empty() { ui.label("No supported image controls available."); }
+        let mut edit = None;
+        for control in &self.device_controls {
+            let desc = &control.description;
+            ui.push_id(desc.id, |ui| {
+                ui.label(&desc.name);
+                ui.small(format!("Range {}–{}, step {}, default {}", desc.minimum, desc.maximum, desc.step, desc.default));
+                let mut value = control.value.unwrap_or(desc.default);
+                if let Some(reason) = &control.unavailable {
+                    ui.label(control.value.map(|value| value.to_string()).unwrap_or_else(|| "Unavailable".into()));
+                    ui.small(reason);
+                    return;
+                }
+                ui.add_enabled_ui(enabled && control.value.is_some(), |ui| {
+                    let before = value;
+                    match desc.typ {
+                        v4l::control::Type::Boolean => {
+                            let mut checked = value != 0;
+                            if ui.checkbox(&mut checked, "Enabled").changed() { value = i64::from(checked); }
+                        }
+                        v4l::control::Type::Menu => {
+                            let items = desc.items.as_deref().unwrap_or_default();
+                            let selected = items.iter().find(|(id, _)| *id as i64 == value).map(|(_, name)| name.to_string()).unwrap_or_else(|| value.to_string());
+                            egui::ComboBox::from_id_salt("value").selected_text(selected).show_ui(ui, |ui| {
+                                for (id, name) in items { ui.selectable_value(&mut value, *id as i64, name.to_string()); }
+                            });
+                        }
+                        _ => {
+                            if ui.add(egui::DragValue::new(&mut value).range(desc.minimum..=desc.maximum).speed(desc.step as f64)).changed() {
+                                let step = desc.step as i128;
+                                let offset = value as i128 - desc.minimum as i128;
+                                let last = (desc.maximum as i128 - desc.minimum as i128) / step;
+                                value = (desc.minimum as i128 + ((offset + step / 2) / step).clamp(0, last) * step) as i64;
+                            }
+                        }
+                    }
+                    if value != before { edit = Some(ControlRequest::Set { id: desc.id, value }); }
+                });
+            });
+        }
+        if let Some(edit) = edit { self.request_device_control(edit); }
     }
 
     fn toolbar_strip(ctx: &egui::Context) -> egui::Rect {
@@ -462,6 +609,8 @@ impl Viewer {
             self.toolbar_visible = false;
         }
         self.screenshot_buttons = [None; 2];
+        self.area_buttons = [None; 2];
+        self.area_cancel_button = None;
         let blue = egui::Color32::from_rgb(32, 77, 112);
         // Reserve only the reveal strip so showing the bar never resizes the remote image.
         egui::TopBottomPanel::top("toolbar_reveal").exact_height(6.0)
@@ -547,13 +696,23 @@ impl Viewer {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                                 }
                                 for (index, format, label) in [(0, Format::Png, "Screenshot PNG"), (1, Format::WebP, "Screenshot WebP")] {
-                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
+                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(label))
                                         .on_hover_text("Save the complete remote video at native resolution, before GPU tuning, without toolbar or borders. WebP is lossless.");
                                     self.screenshot_buttons[index] = Some(response.id);
                                     if response.clicked() { self.take_screenshot(format); }
                                 }
-                                ui.add_enabled(false, egui::Button::new("Capture area"))
-                                    .on_disabled_hover_text("Area capture is not available yet.");
+                                if self.selection.is_some() {
+                                    let response = ui.button("Cancel selection");
+                                    self.area_cancel_button = Some(response.id);
+                                    if response.clicked() { self.finish_area(); self.screenshot_status = "Area selection cancelled".into(); }
+                                } else {
+                                    for (index, format, label) in [(0, Format::Png, "Area PNG"), (1, Format::WebP, "Area WebP")] {
+                                        let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
+                                            .on_hover_text("Select part of a frozen video frame. Remote mouse pauses until capture finishes.");
+                                        self.area_buttons[index] = Some(response.id);
+                                        if response.clicked() { self.start_area(format); }
+                                    }
+                                }
                             });
                         });
                 });
@@ -601,8 +760,8 @@ impl Viewer {
                 return;
             }
             let outer = ui.available_rect_before_wrap();
-            let (width, height) = self.image.as_ref()
-                .map(|f| (f.width, f.height)).unwrap_or((1920, 1080));
+            let frame = self.selection.as_ref().map(|selection| &selection.frame).or(self.image.as_ref());
+            let (width, height) = frame.map(|f| (f.width, f.height)).unwrap_or((1920, 1080));
             let rect = input::fit_rect(outer, width, height);
             // Real GPU shader draws the video inside this viewport.
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -612,9 +771,14 @@ impl Viewer {
                     settings: self.colors,
                 },
             ));
-            let response = ui.interact(rect, egui::Id::new("video"), egui::Sense::click_and_drag());
+            let response = ui.interact(if self.selection.is_some() { outer } else { rect }, egui::Id::new("video"), egui::Sense::click_and_drag());
             // egui clears video focus on an outside press before this response is created.
             if self.remote && self.screenshot_keeps_focus { response.request_focus(); }
+            if self.selection.is_some() {
+                self.select_area(ui, rect, &response);
+                return;
+            }
+            if self.area_export_pending || self.input_blocked { return; }
             let toolbar_rect = self.toolbar_rect;
             let strip = Self::toolbar_strip(ctx);
             let pressed = ctx.input(|i| i.events.iter().any(|event|
@@ -628,6 +792,46 @@ impl Viewer {
                 self.handle_mouse(ctx, &response);
             }
         });
+    }
+
+    fn select_area(&mut self, ui: &mut egui::Ui, video: egui::Rect, response: &egui::Response) {
+        let ctx = ui.ctx();
+        let mut complete = false;
+        for event in ctx.input(|input| input.events.clone()) {
+            let valid_press = |pos| video.contains(pos) && !self.over_toolbar(ctx, pos)
+                && ctx.layer_id_at(pos) == Some(response.layer_id);
+            let point = match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } if valid_press(pos) => {
+                    let (x, y) = input::normalized_point(video, pos);
+                    let selection = self.selection.as_mut().unwrap();
+                    selection.start = Some([x, y]);
+                    selection.end = Some([x, y]);
+                    if self.remote { response.request_focus(); }
+                    None
+                }
+                egui::Event::PointerMoved(pos) => Some(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => {
+                    complete = self.selection.as_ref().unwrap().start.is_some();
+                    Some(pos)
+                }
+                _ => None,
+            };
+            if let Some(pos) = point {
+                let (x, y) = input::normalized_point(video, pos);
+                let selection = self.selection.as_mut().unwrap();
+                if selection.start.is_some() { selection.end = Some([x, y]); }
+            }
+            if complete { break; }
+        }
+        if complete { self.save_area(); return; }
+        if let Some(selection) = &self.selection {
+            if let (Some(start), Some(end)) = (selection.start, selection.end) {
+                let point = |p: [f32; 2]| video.min + egui::vec2(p[0] * video.width(), p[1] * video.height());
+                let rect = egui::Rect::from_two_pos(point(start), point(end));
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 150, 240, 45));
+                ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE), egui::StrokeKind::Inside);
+            }
+        }
     }
 
     fn handle_mouse(&mut self, ctx: &egui::Context, video: &egui::Response) {
@@ -764,7 +968,7 @@ impl eframe::App for Viewer {
             self.right_ctrl = false;
             self.right_alt = false;
             self.release_chord_held = false;
-            if self.remote || self.mode != InputMode::NonFocus { self.release_remote(); }
+            if self.remote || self.mode != InputMode::NonFocus || self.selection.is_some() { self.release_remote(); }
             ctx.memory_mut(|memory| memory.surrender_focus(video_id));
             return;
         }
@@ -966,6 +1170,168 @@ mod tests {
             assert!(Instant::now() < deadline, "screenshot did not finish");
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn area_toolbar_exports_frozen_pixels_and_resumes_only_focus_mode() {
+        let root = std::env::temp_dir().join(format!("nanokvm-area-ui-{}", std::process::id()));
+        for focus in [false, true] {
+            for index in 0..2 {
+                let mut peer = crate::shortcuts::tests::Peer::new();
+                let (mut app, ctx, reports) = input_viewer();
+                if focus {
+                    app.shortcuts = Some(peer.controller(true));
+                    app.request_focus_mode(&ctx);
+                    peer.activate(app.shortcuts.as_mut().unwrap());
+                    app.refresh_shortcuts(&ctx);
+                }
+                reports.try_iter().for_each(drop);
+                let frame = Arc::new(RgbaFrame { width: 8, height: 4,
+                    rgba: (0..32).flat_map(|i| [i, 80, 160, 255]).collect() });
+                app.image = Some(frame.clone());
+                app.screenshot_directory = Some(root.clone());
+                let size = egui::vec2(1400.0, 800.0);
+                for i in 0..4 { toolbar_frame(&mut app, &ctx, size, i as f64 / 10.0, vec![]); }
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                app.keyboard.set_key(4, true);
+                app.buttons = 1;
+                let pos = ctx.read_response(app.area_buttons[index].unwrap()).unwrap().rect.center();
+                for (i, pressed) in [true, false].into_iter().enumerate() {
+                    toolbar_frame(&mut app, &ctx, size, 0.4 + i as f64 / 10.0,
+                        vec![egui::Event::PointerMoved(pos), pointer_button(pos, pressed)]);
+                }
+                assert!(app.selection.is_some());
+                let size = if index == 0 { size } else { egui::vec2(700.0, 1000.0) };
+                for _ in 0..3 { toolbar_frame(&mut app, &ctx, size, 0.55, vec![]); }
+                assert_eq!(app.keyboard.bytes()[2], 4);
+                assert_eq!(app.buttons, 0);
+                let sent: Vec<_> = reports.try_iter().collect();
+                assert!(sent.iter().all(|report| matches!(report, Report::AbsoluteMouse(bytes) if bytes[1] == 0)));
+                assert!(!sent.is_empty(), "held mouse button was not released");
+                let video = input::fit_rect(ctx.read_response(egui::Id::new("video")).unwrap().rect, 8, 4);
+                let start = video.min + video.size() * 0.26;
+                let end = video.min + video.size() * 0.74;
+                let (start, end) = if index == 0 { (start, end) } else { (end, start) };
+                toolbar_frame(&mut app, &ctx, size, 0.6, vec![egui::Event::PointerMoved(start), pointer_button(start, true)]);
+                toolbar_frame(&mut app, &ctx, size, 0.7, vec![egui::Event::PointerMoved(end),
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 40.0), modifiers: egui::Modifiers::default() }]);
+                assert!(reports.is_empty(), "selection gestures reached the remote host");
+                // The live frame can change while selection retains its original pixels.
+                app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![255; 4] }));
+                toolbar_frame(&mut app, &ctx, size, 0.8, vec![pointer_button(end, false)]);
+                assert!(app.selection.is_none() && app.area_export_pending);
+                assert!(reports.is_empty());
+                let path = app.screenshot.as_ref().unwrap().path.clone();
+                wait_screenshot(&mut app);
+                let decoded = image::open(path).unwrap().to_rgba8();
+                assert_eq!(decoded.dimensions(), (4, 2));
+                assert_eq!(decoded.as_raw(), &[&frame.rgba[40..56], &frame.rgba[72..88]].concat());
+                assert_eq!(app.remote, focus);
+                assert_eq!(app.mode, if focus { InputMode::Focus } else { InputMode::NonFocus });
+                if focus { assert_eq!(app.keyboard.bytes()[2], 4); assert!(reports.is_empty()); }
+                else { assert_eq!(app.keyboard.bytes(), [0; 8]); }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn area_cancel_errors_and_mode_exit_never_restore_old_capture() {
+        for focus in [false, true] {
+            for action in ["cancel", "empty", "home", "write", "release", "disconnect", "focus_loss", "export_release", "export_disconnect"] {
+                let mut peer = crate::shortcuts::tests::Peer::new();
+                let (mut app, ctx, reports) = input_viewer();
+                if focus {
+                    app.shortcuts = Some(peer.controller(true));
+                    app.request_focus_mode(&ctx);
+                    peer.activate(app.shortcuts.as_mut().unwrap());
+                    app.refresh_shortcuts(&ctx);
+                }
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                app.start_area(Format::Png);
+                reports.try_iter().for_each(drop);
+                let selection = app.selection.as_mut().unwrap();
+                selection.start = Some([0.0, 0.0]);
+                selection.end = Some([1.0, 1.0]);
+                match action {
+                    "cancel" => {
+                        let size = egui::vec2(1400.0, 800.0);
+                        for _ in 0..3 { toolbar_frame(&mut app, &ctx, size, 0.0, vec![]); }
+                        let pos = ctx.read_response(app.area_cancel_button.unwrap()).unwrap().rect.center();
+                        for pressed in [true, false] {
+                            toolbar_frame(&mut app, &ctx, size, 0.1, vec![egui::Event::PointerMoved(pos), pointer_button(pos, pressed)]);
+                        }
+                    }
+                    "empty" => { app.selection.as_mut().unwrap().end = Some([0.0, 0.0]); app.save_area(); }
+                    "home" => { app.screenshot_directory = None; app.save_area(); }
+                    "write" => { app.screenshot_directory = Some(PathBuf::from("/dev/null/area")); app.save_area(); wait_screenshot(&mut app); }
+                    "release" => app.release_remote(),
+                    "disconnect" => app.disconnect(),
+                    "focus_loss" => { let mut raw = egui::RawInput { focused: false, ..Default::default() }; app.raw_input_hook(&ctx, &mut raw); }
+                    "export_release" | "export_disconnect" => {
+                        let root = std::env::temp_dir().join(format!("nanokvm-area-exit-{}-{focus}-{action}", std::process::id()));
+                        app.screenshot_directory = Some(root.clone());
+                        app.save_area();
+                        assert!(app.area_export_pending);
+                        if action == "export_release" { app.release_remote(); } else { app.disconnect(); }
+                        wait_screenshot(&mut app);
+                        std::fs::remove_dir_all(root).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(app.selection.is_none() && !app.area_export_pending, "{action}");
+                let remains_focus = focus && matches!(action, "cancel" | "empty" | "home" | "write");
+                assert_eq!(app.remote, remains_focus, "{action}");
+                assert_eq!(app.mode == InputMode::Focus, remains_focus, "{action}");
+                if action == "empty" { assert!(app.screenshot_status.contains("empty")); }
+                if action == "home" { assert!(app.screenshot_status.contains("HOME")); }
+                if action == "write" { assert!(app.screenshot_status.contains("Screenshot failed")); }
+                app.refresh_screenshot();
+                assert_eq!(app.remote, remains_focus);
+            }
+        }
+    }
+
+    #[test]
+    fn device_and_gpu_controls_stay_independent_and_disconnect_drops_pending_edits() {
+        let (mut app, ctx, _) = input_viewer();
+        let (requests, receiver) = bounded(1);
+        let (updates, controls) = bounded(2);
+        let mut camera = camera(false).0;
+        camera.control_requests = requests;
+        camera.controls = controls;
+        app.camera = Some(camera);
+        let gamma = || ImageControl { description: crate::controls::tests::gamma(), value: Some(3), unavailable: None };
+        app.device_controls = vec![gamma()];
+        app.colors = ColorSettings::SOFT_WHITE;
+        app.request_device_control(ControlRequest::Set { id: gamma().description.id, value: 7 });
+        app.request_device_control(ControlRequest::Refresh);
+        assert!(app.device_control_pending);
+        assert_eq!(receiver.len(), 1);
+        assert!(matches!(receiver.try_recv().unwrap(), ControlRequest::Set { value: 7, .. }));
+        updates.send(crate::controls::Update { controls: Ok(vec![gamma()]), message: "Write failed; value unchanged".into() }).unwrap();
+        app.refresh_messages();
+        assert!(!app.device_control_pending);
+        assert_eq!(app.device_controls[0].value, Some(3));
+        assert!(app.device_control_status.contains("Write failed"));
+        assert_eq!(app.colors, ColorSettings::SOFT_WHITE);
+        app.colors_open = true;
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 1000.0))), ..Default::default() };
+        let output = ctx.run(raw.clone(), |ctx| app.color_panel(ctx));
+        label_position(&output, "V4L2 Device Controls");
+        label_position(&output, "GPU Color Tuning");
+        let pos = label_position(&output, "Reset 1:1");
+        let _ = ctx.run(egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw }, |ctx| app.color_panel(ctx));
+        assert_eq!(app.colors, ColorSettings::default());
+        assert_eq!(app.device_controls[0].value, Some(3));
+        assert!(receiver.is_empty());
+        app.request_device_control(ControlRequest::Refresh);
+        assert!(app.device_control_pending);
+        app.disconnect();
+        assert!(app.device_controls.is_empty() && !app.device_control_pending);
+        updates.send(crate::controls::Update { controls: Ok(vec![gamma()]), message: "Stale reply".into() }).ok();
+        app.refresh_messages();
+        assert!(app.device_controls.is_empty());
     }
 
     #[test]
@@ -1287,8 +1653,8 @@ mod tests {
         let (mut app, ctx, reports) = input_viewer();
         let size = egui::vec2(1000.0, 700.0);
         toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
-        let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
-        let area = label_position(&output, "Capture area");
+        toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
+        let area = app.toolbar_rect.unwrap().min + egui::vec2(2.0, 2.0);
         app.toolbar_pinned = false;
         toolbar_frame(&mut app, &ctx, size, 1.0, vec![egui::Event::PointerGone]);
         assert!(!app.toolbar_visible);
@@ -1304,6 +1670,7 @@ mod tests {
         assert_eq!(app.last_mouse, (0.25, 0.75));
         assert!(reports.is_empty(), "toolbar gestures reached remote video");
         assert!(app.screenshot.is_none(), "unavailable area action started an export");
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
         app.buttons = 1;
         toolbar_frame(&mut app, &ctx, size, 1.2, vec![pointer_button(area, false)]);
         assert!(matches!(reports.try_recv().unwrap(), Report::AbsoluteMouse(bytes)
@@ -1320,7 +1687,7 @@ mod tests {
         toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
         let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
         for id in app.screenshot_buttons.iter().flatten() { assert!(!ctx.read_response(*id).unwrap().enabled()); }
-        for label in ["Focus Mode", "Disconnect", "Capture area", "Screenshot PNG", "Screenshot WebP"] {
+        for label in ["Focus Mode", "Disconnect", "Area PNG", "Area WebP", "Screenshot PNG", "Screenshot WebP"] {
             let pos = label_position(&output, label);
             toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
             assert_eq!(app.mode, InputMode::NonFocus);
@@ -1769,7 +2136,7 @@ mod tests {
             while !stop.load(Ordering::Acquire) { thread::yield_now(); }
             Ok(())
         });
-        (CameraHandle { frames, status, worker }, closed)
+        (CameraHandle { frames, status, worker, control_requests: bounded(1).0, controls: bounded(1).1 }, closed)
     }
 
     fn serial() -> (SerialHandle, Receiver<()>, Arc<Mutex<Vec<u8>>>) {
@@ -1828,7 +2195,7 @@ mod tests {
                 Err(cause.into())
             });
             let (serial, serial_closed, bytes) = serial();
-            app.camera = Some(CameraHandle { frames, status, worker });
+            app.camera = Some(CameraHandle { frames, status, worker, control_requests: bounded(1).0, controls: bounded(1).1 });
             app.serial = Some(serial);
             hold_input(&mut app);
             app.send_keyboard();
@@ -1900,7 +2267,7 @@ mod tests {
             let _ = stalled.recv();
             Ok(())
         });
-        app.camera = Some(CameraHandle { frames, status, worker });
+        app.camera = Some(CameraHandle { frames, status, worker, control_requests: bounded(1).0, controls: bounded(1).1 });
         app.serial = Some(serial::spawn(app.serial_path.clone()));
         hold_input(&mut app);
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;

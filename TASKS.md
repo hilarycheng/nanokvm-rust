@@ -1,14 +1,15 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 15.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 16.
 
-**18 tasks: 12 delivered, 6 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 16 delivered, 2 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision adds T-16's centered connection bar, pinning, auto-hide, and persistent reveal strip.
-T-12 software acceptance now includes the new toolbar in both input modes.
-T-16 stays open only for T-18's area-capture action; its placeholder is visibly disabled.
+This revision completes T-16/T-17/T-18 and T-11's combined-panel software acceptance.
+Device controls and selected-area PNG/WebP exports are integrated with both input modes.
+The user approved T-16 through T-21; this repository defines no T-19, T-20, or T-21.
+No requirements or completion claims are invented for those undefined IDs.
 Delivered counts describe software acceptance. Live hardware checks and T-13 remain deferred by the user.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
@@ -33,15 +34,16 @@ Revision 13 adds the current acceptance matrix in [INTEGRATION-VERIFICATION.md](
 Revision 14 records 62 passing app tests and three backend tests in [MODE-VERIFICATION.md](MODE-VERIFICATION.md).
 The unchanged GPU test remains explicitly ignored in this software-only pass.
 Revision 15 records 65 passing app tests, including toolbar layout, pointer routing, fullscreen-command, and auto-hide screenshot checks in [TOOLBAR-VERIFICATION.md](TOOLBAR-VERIFICATION.md).
+Revision 16 records current controls, area capture, and integration checks in [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md).
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
 | --- | --- | --- |
 | Native Rust UI with egui/eframe | `main.rs` starts eframe with wgpu; `app.rs` implements the viewer. Hardware acceptance remains open. | T-03, T-14 |
 | Full-screen screenshots, including during Focus Mode; WebP and PNG output | PNG and lossless WebP toolbar actions preserve ownership in both modes and save native frames before GPU tuning. The pinned and auto-hide toolbar retains both modes and screenshot ownership. | T-12, T-15 |
-| Area screenshots; pause remote mouse forwarding; conditional resumption | No selection state or crop workflow exists. | T-18 |
-| Separate V4L2 and GPU panels; concurrent gamma controls; clear guidance | Only a GPU panel exists. `capture.rs` configures capture format but exposes no image controls. | T-11, T-17 |
-| GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | GPU rendering and validated preset persistence pass automated checks. Natural-color and combined-panel acceptance remain open. | T-11, T-17 |
+| Area screenshots; pause remote mouse forwarding; conditional resumption | Area PNG/WebP freeze a frame, isolate mouse gestures, crop native pixels, and resume only while Focus Mode remains active. | T-18 |
+| Separate V4L2 and GPU panels; concurrent gamma controls; clear guidance | Separate device/GPU panels expose validated worker-owned V4L2 edits and independent GPU settings. | T-11, T-17 |
+| GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | GPU rendering and validated preset persistence pass automated checks. Combined-panel software checks pass; natural-color hardware acceptance remains deferred. | T-11, T-17 |
 | Capture and release remote keyboard and mouse input | `remote` gates forwarding. Input release discards stale queued reports; shutdown attempts neutral reports directly. Failed device writes still cannot guarantee remote release. | T-05, T-08, T-09 |
 | Focus Mode captures keyboard input from Sway; local Right-Ctrl, Right-Alt release shortcut | Focus Mode waits for Wayland activation. Right-Ctrl + Right-Alt releases locally; Escape forwards. Software protocol and routing checks pass. | T-15 |
 | Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Toolbar actions select both modes. Non-Focus Mode uses video/local ownership; Focus Mode inhibits compositor shortcuts until release. | T-09, T-15, T-16 |
@@ -51,14 +53,10 @@ Historical test results in SCOPE.md remain historical evidence.
 | Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Read/write errors, video wait timeout, and idle tty probe errors initiate shared cleanup. Software checks pass, including T-15 inhibition destruction on either worker ending. | T-07, T-15 |
 | Physical Meta forwarding or another key mapped to remote Meta | Optional F12 mapping and the Super toggle supply remote Meta. Mode exits clear both holds. Live hardware checks are deferred. | T-10, T-15 |
 
-Remaining implementation gaps against DESIGN.md:
-
-- T-16 retains a disabled area-capture action until T-18 implements selection and export.
-- The separate V4L2 panel and combined device/GPU control checks remain under T-17.
-- Selected-area screenshots and conditional mouse resumption remain under T-18.
-
-SCOPE.md now distinguishes historical proposals from current decisions and DESIGN.md requirements.
-T-14 retains the remaining software integration work. Hardware acceptance is tracked separately and deferred.
+All defined DESIGN.md features now have software implementation and regression evidence.
+Live hardware acceptance remains NOT RUN under the user's software-first scope.
+T-13 remains paused. T-14 retains final supplementary acceptance dependent on that comparison.
+SCOPE.md distinguishes historical proposals from current decisions and DESIGN.md requirements.
 
 ## Delivered artifacts
 
@@ -181,7 +179,7 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
 
 ## Toolbar
 
-- [ ] **T-16 — Complete the remote desktop toolbar**
+- [x] **T-16 — Complete the remote desktop toolbar**
   - Basis: DESIGN.md toolbar behavior. Depends on T-05 and T-15; screenshot actions integrate with T-12 and T-18.
   - Touchpoints: `toolbar`, viewport Fullscreen commands, pointer hit testing, and screenshot actions.
   - Work: style the top toolbar like Microsoft Remote Desktop. Add pinning and auto-hide with a persistent narrow reveal strip.
@@ -192,20 +190,22 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
   - Result: a centered blue connection bar overlays video. Pinning defaults on; auto-hide leaves a six-point strip after 0.7 seconds away. Keyboard focus and active pointer interaction keep the bar reachable.
   - Result: overlay/strip hit testing keeps local gestures out of remote pointer reports, including same-frame reveal and owned drag release. Bottom status remains visible while hidden.
   - Result: PNG/WebP actions preserve both input modes and held keyboard ownership after reveal. Missing-frame and busy actions are disabled.
-  - Remaining: Capture area stays disabled until T-18 supplies selection and export. Keep T-16 open for that integration; live compositor acceptance remains deferred.
+  - T-18 result: Area PNG, Area WebP, and Cancel selection replace the disabled placeholder. Both formats and input modes pass toolbar integration checks. Live compositor acceptance remains deferred.
 
 ## Color controls
 
-- [ ] **T-17 — Add the standard V4L2 image-control panel**
+- [x] **T-17 — Add the standard V4L2 image-control panel**
   - Basis: DESIGN.md separate panels, concurrent gamma, and guidance. Depends on T-05; hardware acceptance uses T-04.
   - Touchpoints: capture-device control access, worker communication, and `color_panel`.
   - Work: enumerate supported standard image controls, values, ranges, steps, and availability. Apply edits through the device-owning path.
   - Done: V4L2 controls appear separately from GPU controls. Unsupported or unavailable controls have clear status.
   - Done: V4L2 gamma and GPU gamma can remain active together when the device supports gamma.
   - Done: labels explain device processing versus GPU processing. Replace the current GPU-only guidance.
-  - Evidence: checks cover control ranges, unsupported controls, write errors, and disconnection during edits. Hardware validates actual image changes.
+  - Evidence: [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md) covers ranges, steps, sparse menus, unavailable controls, write/read errors, independent GPU state, and disconnect during edits.
+  - Result: the capture worker enumerates, validates, writes, and reads back device values. One pending request disables edits until its reply. GPU Reset and presets never write device controls.
+  - Remaining: actual device support, image changes, and simultaneous gamma calibration require deferred hardware acceptance.
 
-- [ ] **T-11 — Validate GPU controls and preset persistence**
+- [x] **T-11 — Validate GPU controls and preset persistence**
   - Basis: DESIGN.md GPU controls and presets; supplementary S2. Depends on T-03 and T-05; combined-panel acceptance uses T-17.
   - Touchpoints: `ColorSettings`, `color_panel`, `save_colors`, `config_path`, `GpuVideo`, and `color.wgsl`.
   - Work: retain Gamma, Highlights, Saturation, Exposure, White peak, Reset, and Soft white. Verify existing wgpu/WGSL processing.
@@ -217,7 +217,7 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
   - Result: [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) records 52 passing tests, including actual RX 6600 pixel readback for sRGB/non-sRGB targets, all five controls, Soft white, texture resize, and Reset.
   - Result: preset values must be finite and within UI ranges. Atomic replacement preserves the existing file on validation or write failure. Missing/invalid/unreadable presets use defaults with a dedicated status; saves report success or the error.
   - Result: every GPU control has guidance. The panel explains device processing before GPU processing and allows both gamma controls together.
-  - Remaining: T-17 must verify independent device/GPU control integration. Natural-color hardware acceptance is deferred; offscreen GPU checks do not verify capture-device or monitor calibration.
+  - T-17 result: separate device/GPU panels retain independent values. GPU Reset changes no device setting. Combined-panel software acceptance passes; natural-color hardware calibration remains deferred.
 
 ## Screenshots
 
@@ -236,7 +236,7 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
   - Result: [SCREENSHOT-VERIFICATION.md](SCREENSHOT-VERIFICATION.md) records decoded pixel/dimension checks and real egui clicks with capture enabled, disabled, and local keyboard ownership. Screenshot clicks preserve held remote keyboard input and do not forward pointer events.
   - T-16 result: both formats retain button, pixel, and ownership behavior in the new toolbar, including auto-hide/reveal in both modes. Software acceptance is complete. Live acceptance is deferred; area selection belongs to T-18.
 
-- [ ] **T-18 — Capture a user-selected area with safe mouse forwarding**
+- [x] **T-18 — Capture a user-selected area with safe mouse forwarding**
   - Basis: DESIGN.md partial capture and conditional input resumption. Depends on T-09, T-12, and T-15.
   - Touchpoints: toolbar area action, selection overlay, image-coordinate conversion, mouse routing, and screenshot export.
   - Work: start area selection from the toolbar and pause remote mouse forwarding before selection gestures begin.
@@ -246,6 +246,10 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
   - Done: resume remote mouse forwarding only if Focus Mode remains active after capture; apply the same guard after cancellation or failure.
   - Done: leaving Focus Mode or disconnecting during selection never restores previous capture state automatically.
   - Evidence: checks cover crop bounds, both formats, cancellation, save failure, mode changes, and disconnect during selection.
+  - Result: [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md) records frozen-frame pixel checks, both toolbar actions, resized/letterboxed selection, Cancel, and guarded resumption.
+  - Result: held mouse buttons are neutralized before selection. Keyboard ownership is retained. Saving, cancelling, and failing resume mouse forwarding only in active Focus Mode.
+  - Result: mode exit, window focus loss, and disconnect cancel selection. An export already running never restores old input ownership after mode exit or disconnect.
+  - Remaining: live screenshot and remote mouse acceptance is deferred.
 
 ## Measurement and final acceptance
 
@@ -269,7 +273,8 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
   - Evidence: retain commands, environment, results, and remaining limitations. Reuse unaffected checks instead of repeating them unnecessarily.
   - Result: [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md) maps every design requirement and supplementary scope to evidence and remaining checks. The release build, 56 app tests including GPU rendering, and two backend tests pass.
   - Result: README.md and SCOPE.md now use English and match current controls, screenshot choices, limitations, and historical evidence. AGENTS.md and DESIGN.md remain unchanged.
-  - Remaining: T-17/T-18 require implementation; T-16 needs area-action integration. T-11 retains combined-control checks. Live checks and T-13 remain deferred; T-14 final software integration stays open.
+  - Current result: defined software features and regression integration pass; see [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md). README.md matches device controls and area capture.
+  - Remaining: final supplementary acceptance depends on paused T-13. Live hardware checks remain separately deferred; this task does not claim that comparison or hardware acceptance.
 
 ## Progress and maintenance
 
@@ -279,11 +284,11 @@ T-14 retains the remaining software integration work. Hardware acceptance is tra
 | Build and device evidence | T-03, T-04 | 2 | 0 |
 | Connection and cleanup | T-05, T-06, T-07 | 3 | 0 |
 | Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 4 | 0 |
-| Toolbar | T-16 | 0 | 1 |
-| Color controls | T-17, T-11 | 0 | 2 |
-| Screenshots | T-12, T-18 | 1 | 1 |
+| Toolbar | T-16 | 1 | 0 |
+| Color controls | T-17, T-11 | 2 | 0 |
+| Screenshots | T-12, T-18 | 2 | 0 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 12 | 6 |
+| Total | T-01–T-18 | 16 | 2 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.

@@ -1,12 +1,12 @@
 # NanoKVM USB — Rust Viewer
 
 A native Linux NanoKVM USB viewer built with Rust, egui/eframe, and wgpu.
-It provides MJPEG video, serial keyboard/mouse forwarding, GPU color controls, and full-video screenshots.
-Software integration acceptance remains open; see [mode verification](MODE-VERIFICATION.md) and [task status](TASKS.md).
+It provides MJPEG video, serial keyboard/mouse forwarding, device and GPU color controls, and full-video or selected-area screenshots.
+Software integration checks pass; see [current verification](CONTROLS-AREA-VERIFICATION.md) and [task status](TASKS.md).
 Live hardware acceptance is deferred at the user's request.
 
 The intended environment is Ubuntu with Sway → NanoKVM USB → Arch Linux with GNOME.
-Focus Mode, Non-Focus Mode, and a pinned/auto-hide toolbar are available. V4L2 image controls and area screenshots remain pending.
+Focus Mode, Non-Focus Mode, and a pinned/auto-hide toolbar are available.
 Lower RAM usage than the original application has not been measured. T-13 is deferred at the user's request.
 
 ## Build and start
@@ -94,7 +94,7 @@ Showing or hiding the bar does not resize the remote image. Controls wrap within
 Fullscreen and Windowed change the viewer window; the same reveal strip remains available.
 Mode, connection, and screenshot status stay visible below the video even when the bar hides.
 Screenshot actions are disabled without a frame or while an export is running.
-Capture area remains disabled until the area-selection workflow is implemented.
+Area PNG and Area WebP start selection. Cancel selection stops an active selection.
 Opening Color releases input capture. Resume explicitly when finished adjusting colors.
 
 ## Screenshots
@@ -112,13 +112,29 @@ Disconnect does not change an already requested snapshot.
 App exit requests cancellation within the shared shutdown deadline.
 Forced termination during a write can leave a partial new image; existing images remain protected.
 Both formats have software checks in Focus Mode and Non-Focus Mode, including capture after toolbar auto-hide/reveal.
-Area capture is not implemented and remains under T-18.
+Use Area PNG or Area WebP to freeze the current frame, then drag the desired rectangle.
+Selection starts inside the video. Dragging beyond its edges clamps the crop to the image.
+The crop uses native image pixels, including after window resizing or letterboxing.
+Selection gestures and wheel input stay local. Starting selection releases held remote mouse buttons.
+Keyboard ownership remains unchanged while selecting or saving; remote keys still forward when video owns the keyboard.
+Cancel selection stops without saving. Empty selections and export failures show a status message.
+After saving, cancelling, or failing, mouse forwarding resumes only if Focus Mode remains active.
+In Non-Focus Mode, click video or use Capture input to resume explicitly.
+Releasing input, losing window focus, or disconnecting cancels selection and never restores old capture state.
+An export already started can finish after disconnect; it does not restore input.
 
-## GPU color controls
+## Device and GPU color controls
 
 Open Color for Exposure, Gamma, Highlights, White peak, and Saturation. Hover over each control for guidance.
 GPU adjustments follow V4L2 device processing; both gamma controls can be active together.
-The separate V4L2 image-control panel is not implemented.
+Color contains separate GPU Color Tuning and V4L2 Device Controls panels.
+The device panel lists supported standard brightness, color, white-balance, gain, exposure, and anti-flicker controls.
+It shows device ranges, steps, defaults, current values, and availability. Unavailable controls cannot be edited.
+Refresh device controls reads current settings, including changes made outside this viewer.
+Edits run on the capture worker. The panel waits for device readback before accepting another edit.
+An automatic control can disable its manual counterpart; change the automatic control first.
+Device processing affects captured frames and screenshots before GPU processing.
+Device settings are not saved in GPU presets. Driver behavior determines whether device settings persist after reconnect.
 
 Reset 1:1 restores neutral GPU settings only. Soft white resets other controls and sets white peak to 0.84.
 Neither action changes the saved preset until Save preset is selected.
@@ -133,7 +149,7 @@ Startup restores valid preset values. Missing, invalid, or unreadable presets us
 Saving writes and syncs a new temporary file before replacing the preset. Reported failures preserve the previous preset.
 Unavailable configuration paths produce an error. Concurrent saves use the last successful replacement.
 [Color verification](COLOR-VERIFICATION.md) records ranges, persistence checks, and RX 6600 offscreen rendering results.
-Natural-color acceptance still needs NanoKVM reference images and combined V4L2/GPU checks.
+Combined-panel software checks pass. Natural-color acceptance still needs NanoKVM reference images and hardware calibration.
 
 ## Troubleshooting and validation
 
@@ -144,6 +160,7 @@ Natural-color acceptance still needs NanoKVM reference images and combined V4L2/
 | Video wait timeout | A frame wait exceeding 500 ms ends the stream; the viewer does not retry that stream automatically. |
 | Connect stays disabled | Wait for both workers to stop. A driver that ignores timeouts may delay closure. |
 | Remote input does not arrive | Confirm video focus and mode status. Non-Focus Mode leaves desktop shortcuts available. |
+| Device control fails | Read its status, use Refresh, and check whether an automatic setting disables the manual control. |
 | Screenshot or preset fails | Read the displayed cause and check the destination permissions and absolute HOME/XDG paths. |
 
 Run the application and patched input-backend tests:

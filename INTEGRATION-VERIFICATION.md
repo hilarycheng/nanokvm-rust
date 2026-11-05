@@ -2,6 +2,10 @@
 
 Date: 2026-11-05 (Asia/Hong_Kong).
 Source baseline: `5abf129` (T-12). This revision changes documentation only.
+Current update: [CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md) supersedes the implementation gaps below.
+T-16/T-17/T-18 and combined-panel software checks are complete. The following results remain historical baseline evidence.
+T-13 and live hardware acceptance remain deferred.
+
 
 Subsequent scope update: the user prioritized software completion and deferred live hardware checks before approving T-15.
 [MODE-VERIFICATION.md](MODE-VERIFICATION.md) supersedes this baseline's missing-mode and inhibition statements.

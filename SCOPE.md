@@ -18,11 +18,11 @@ Neither the color cause nor Node.js's share of memory overhead has been establis
 | ID | Original requirement | Current implementation and evidence | Remaining acceptance |
 | --- | --- | --- | --- |
 | S1 | Physical Meta/Super and combinations | DESIGN.md also permits another mapped key. T-10 adds optional F12-to-Meta; the Super toggle remains available. [Keyboard checks](KEYBOARD-VERIFICATION.md) pass. | T-15 modes and inhibition pass software checks. Live Sway/NanoKVM acceptance is deferred; physical Meta capture remains absent. |
-| S2 | Gamma and useful controls for natural video | Five GPU controls, presets, validation, and offscreen rendering have [software/GPU evidence](COLOR-VERIFICATION.md). | T-17 V4L2 panel, combined gamma checks, and natural-color reference acceptance. |
+| S2 | Gamma and useful controls for natural video | Five GPU controls, presets, validation, and offscreen rendering have [software/GPU evidence](COLOR-VERIFICATION.md). | T-17 adds device controls and combined-panel software checks. Natural-color hardware calibration remains deferred. |
 | S3 | Disconnect on problems and reconnect manually after recovery | T-05/T-07 coordinate video and serial cleanup, clear input, attempt neutral reports, and permit manual retry. [Lifecycle checks](LIFECYCLE-VERIFICATION.md) pass. | T-15 inhibition cleanup passes software checks. Live integration is deferred; failed writes cannot guarantee remote release. |
 | S4 | Start without connecting | T-05 starts disconnected. Enumeration alone never starts device workers. | Retain behavior during final integration; this does not concern system startup. |
 | S5 | Identify matching video and serial automatically | T-04 inventories the hardware. T-06 matches the supported USB profile and rescans on Connect. [Discovery checks](DISCOVERY-VERIFICATION.md) pass. | Unknown or ambiguous candidates require manual paths. This is not multi-device management. |
-| S6 | Capture images | T-12 exports full native video before GPU tuning as PNG or lossless WebP. [Screenshot checks](SCREENSHOT-VERIFICATION.md) pass. | Both modes and toolbar auto-hide/reveal pass software checks. T-18 area selection remains; live capture acceptance is deferred. |
+| S6 | Capture images | T-12 exports full native video before GPU tuning as PNG or lossless WebP. [Screenshot checks](SCREENSHOT-VERIFICATION.md) pass. | Both modes and toolbar auto-hide/reveal pass software checks. T-18 adds frozen-frame area selection and conditional mouse resumption. Live capture acceptance is deferred. |
 | S7 | Reduce RAM relative to the original viewer | Bounded queues and native workers exist, but no comparable memory baseline exists. | T-13 is deferred at the user's request on 2026-11-05. No memory improvement is claimed. |
 
 ## Decisions replacing historical proposals
@@ -34,8 +34,8 @@ Neither the color cause nor Node.js's share of memory overhead has been establis
 - Automatic pairing requires the recorded identities and topology. Ambiguous inventory never selects a guessed pair.
 - PNG is the primary screenshot format; lossless WebP is also available. Both save under ~/Pictures/NanoKVM without overwriting.
 - T-12 records native decoded video before GPU tuning. The earlier proposed GPU-adjusted screenshot default is superseded.
-- Screenshots exclude local controls and borders. Area capture remains required under DESIGN.md and T-18.
-- DESIGN.md permits simultaneous V4L2 and GPU gamma adjustments. A separate V4L2 panel remains required.
+- Full and selected-area screenshots exclude local controls and borders. Both use native decoded pixels before GPU tuning.
+- Separate V4L2 and GPU panels permit simultaneous gamma adjustments. Device controls run through the capture worker.
 - Contrast, Temperature/Tint, and comparison views were discussion options, not approved requirements.
 - Natural-color references and memory acceptance thresholds remain unsettled. The proposed T-13 measurement duration was not approved.
 - The user selected simultaneous Right-Ctrl + Right-Alt release in either order. Escape forwards in both modes.
@@ -78,3 +78,6 @@ Historical test counts in earlier records describe their respective revisions; t
 [MODE-VERIFICATION.md](MODE-VERIFICATION.md) records T-15 software checks and hardware deferral.
 [TOOLBAR-VERIFICATION.md](TOOLBAR-VERIFICATION.md) records T-16 toolbar and full-video screenshot integration.
 NanoKVM streaming, Sway input, natural-color acceptance, and original/Rust RAM comparison remain unverified.
+
+[CONTROLS-AREA-VERIFICATION.md](CONTROLS-AREA-VERIFICATION.md) records current T-16/T-17/T-18 and combined-panel software acceptance.
+T-13 remains paused; final supplementary comparison and live hardware acceptance are not claimed.

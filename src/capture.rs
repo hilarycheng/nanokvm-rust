@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use jpeg_decoder::{Decoder, PixelFormat};
 use std::{io::Cursor, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
-use crate::worker::Worker;
+use crate::{worker::Worker, controls::{self, Request, Update}};
 use v4l::{buffer::Type, io::traits::CaptureStream, prelude::MmapStream, video::Capture, Device, FourCC};
 
 #[derive(Debug)]
@@ -17,6 +17,8 @@ pub struct CameraHandle {
     pub frames: Receiver<Arc<RgbaFrame>>,
     pub status: Receiver<String>,
     pub worker: Worker,
+    pub control_requests: Sender<Request>,
+    pub controls: Receiver<Update>,
 }
 
 fn decode_mjpeg(data: &[u8]) -> Result<RgbaFrame> {
@@ -45,7 +47,7 @@ fn decode_mjpeg(data: &[u8]) -> Result<RgbaFrame> {
     Ok(RgbaFrame { width, height, rgba })
 }
 
-fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sender<String>, stop: &AtomicBool) -> Result<()> {
+fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sender<String>, requests: Receiver<Request>, updates: Sender<Update>, stop: &AtomicBool) -> Result<()> {
     if stop.load(Ordering::Acquire) { return Ok(()); }
     let dev = Device::with_path(&device_path).context("open video device")?;
     let mut fmt = dev.format().context("query capture format")?;
@@ -60,7 +62,12 @@ fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sen
 
     let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 4).context("start capture")?;
     stream.set_timeout(Duration::from_millis(500));
+    let _ = updates.try_send(controls::process(&dev, Request::Refresh));
     while !stop.load(Ordering::Acquire) {
+        if let Ok(request) = requests.try_recv() {
+            if stop.load(Ordering::Acquire) { break; }
+            let _ = updates.try_send(controls::process(&dev, request));
+        }
         // A timeout exits this stream; retrying next() would requeue an undequeued buffer.
         let next = stream.next();
         if stop.load(Ordering::Acquire) { break; }
@@ -83,8 +90,10 @@ fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sen
 pub fn spawn(device: String) -> CameraHandle {
     let (frame_tx, frames) = bounded(2);
     let (status_tx, status) = bounded(8);
+    let (control_requests, requests) = bounded(1);
+    let (updates, controls) = bounded(2);
     let worker = Worker::spawn(move |stop| {
-        capture_loop(device, frame_tx, status_tx, &stop).map_err(|err| format!("Video stopped: {err:#}"))
+        capture_loop(device, frame_tx, status_tx, requests, updates, &stop).map_err(|err| format!("Video stopped: {err:#}"))
     });
-    CameraHandle { frames, status, worker }
+    CameraHandle { frames, status, worker, control_requests, controls }
 }
