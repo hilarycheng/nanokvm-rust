@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 2.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 3.
 
-**18 tasks: 2 delivered, 16 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 3 delivered, 15 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision only updates the task list.
+This revision records T-03 build verification and the generated Cargo.lock. Application source and build configuration remain unchanged.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -16,8 +16,8 @@ They are not additional requirements attributed to DESIGN.md.
 
 ## Source baseline and design gaps
 
-This revision reviews all eight files under `src/`, plus `Cargo.toml`, `build.sh`, and `.gitignore`.
-It does not rerun builds, tests, GPU rendering, or hardware checks.
+Revision 2 reviewed all eight files under `src/`, plus `Cargo.toml`, `build.sh`, and `.gitignore`.
+Revision 3 verifies the release build and existing tests under T-03. GPU rendering and hardware checks remain unverified.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -55,16 +55,18 @@ T-14 reconciles the remaining documentation after implementation.
 - [x] **T-02 — Create the release build script and ignore rules**
   - Evidence: [build.sh](build.sh) is executable and builds the release binary before copying it to the project root.
   - [.gitignore](.gitignore) excludes `/target/` and `/nanokvm-rust`.
-  - Completion covers file creation only. Actual build output remains unverified under T-03.
+  - Completion covers file creation only. Actual build output is verified under T-03.
 
 ## Build and device evidence
 
-- [ ] **T-03 — Verify the release build and root executable**
+- [x] **T-03 — Verify the release build and root executable**
   - Basis: native Rust desktop delivery; existing build-tool scope. Depends on T-02.
   - Touchpoints: `build.sh`, `.gitignore`, `Cargo.toml`, `src/main.rs`, and build records.
   - Work: run the release build and verify the copied binary, executable permissions, help output, and build-failure handling.
   - Done: the root binary matches the release output. Artifacts are ignored; source and Cargo.lock remain trackable.
   - Evidence: record commands, toolchain, resolved dependency versions, and results. Existing protocol tests pass with that dependency resolution.
+  - Result: [BUILD-VERIFICATION.md](BUILD-VERIFICATION.md) records the successful cached offline release build, matching binaries, executable permissions, both help options, ignore rules, and two build-failure checks.
+  - Result: 5/5 protocol tests pass with the generated [Cargo.lock](Cargo.lock). Online registry access failed; hardware and GUI acceptance remain outside this task.
 
 - [ ] **T-04 — Identify the physical NanoKVM device pair**
   - Basis: supplementary S5. Requires accessible NanoKVM hardware.
@@ -216,14 +218,14 @@ T-14 reconciles the remaining documentation after implementation.
 | Workstream | Task IDs | Delivered | Open |
 | --- | --- | --- | --- |
 | Initial artifacts | T-01, T-02 | 2 | 0 |
-| Build and device evidence | T-03, T-04 | 0 | 2 |
+| Build and device evidence | T-03, T-04 | 1 | 1 |
 | Connection and cleanup | T-05, T-06, T-07 | 0 | 3 |
 | Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 0 | 4 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 2 | 16 |
+| Total | T-01–T-18 | 3 | 15 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.
