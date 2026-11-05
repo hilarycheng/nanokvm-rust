@@ -71,20 +71,19 @@ pub struct EventResponse {
 
 // ----------------------------------------------------------------------------
 
-/// Keyboard input before clipboard translation, in native event order.
+/// Keyboard input before clipboard translation, interleaved with pointer events.
 #[derive(Clone, Debug)]
 pub enum KeyboardInput {
     Key(egui::Event),
-    Modifiers(egui::Modifiers),
-    RightControl(bool),
-    RightAlt(bool),
+    Modifier { key: winit::keyboard::KeyCode, pressed: bool },
+    Pointer(egui::Event),
 }
 
 /// Drain the keyboard input published by `State::take_egui_input` for this frame.
-pub fn take_keyboard_input(ctx: &egui::Context, viewport: ViewportId) -> Vec<KeyboardInput> {
+pub fn take_keyboard_input(ctx: &egui::Context, viewport: ViewportId) -> Option<Vec<KeyboardInput>> {
     ctx.data_mut(|data| data.remove_temp::<Vec<KeyboardInput>>(
         egui::Id::new("egui-winit-keyboard-input").with(viewport),
-    )).unwrap_or_default()
+    ))
 }
 
 /// Handles the integration between egui and a winit Window.
@@ -299,7 +298,8 @@ impl State {
         }
 
         use winit::event::WindowEvent;
-        match event {
+        let first_event = self.egui_input.events.len();
+        let response = match event {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let native_pixels_per_point = *scale_factor as f32;
 
@@ -493,7 +493,6 @@ impl State {
                 } else {
                     ctrl
                 };
-                self.keyboard_input.push(KeyboardInput::Modifiers(self.egui_input.modifiers));
 
                 EventResponse {
                     repaint: true,
@@ -534,7 +533,16 @@ impl State {
                     consumed: self.egui_ctx.wants_pointer_input(),
                 }
             }
-        }
+        };
+        self.record_pointer_events(first_event);
+        response
+    }
+
+    fn record_pointer_events(&mut self, first_event: usize) {
+        self.keyboard_input.extend(self.egui_input.events[first_event..].iter().filter(|event|
+            matches!(event, egui::Event::PointerButton { .. } | egui::Event::PointerMoved(_) |
+                egui::Event::PointerGone | egui::Event::MouseWheel { .. })
+        ).cloned().map(KeyboardInput::Pointer));
     }
 
     pub fn ime_event_enable(&mut self) {
@@ -766,7 +774,7 @@ impl State {
         } = event;
 
         let pressed = *state == winit::event::ElementState::Pressed;
-        self.on_release_modifier(*physical_key, pressed);
+        self.on_modifier(*physical_key, pressed);
 
         let physical_key = if let winit::keyboard::PhysicalKey::Code(keycode) = *physical_key {
             key_from_key_code(keycode)
@@ -815,11 +823,14 @@ impl State {
         }
     }
 
-    fn on_release_modifier(&mut self, key: winit::keyboard::PhysicalKey, pressed: bool) {
+    fn on_modifier(&mut self, key: winit::keyboard::PhysicalKey, pressed: bool) {
         use winit::keyboard::{KeyCode, PhysicalKey};
         match key {
-            PhysicalKey::Code(KeyCode::ControlRight) => self.keyboard_input.push(KeyboardInput::RightControl(pressed)),
-            PhysicalKey::Code(KeyCode::AltRight) => self.keyboard_input.push(KeyboardInput::RightAlt(pressed)),
+            PhysicalKey::Code(key @ (KeyCode::ControlLeft | KeyCode::ControlRight |
+                KeyCode::ShiftLeft | KeyCode::ShiftRight | KeyCode::AltLeft | KeyCode::AltRight |
+                KeyCode::SuperLeft | KeyCode::SuperRight)) => {
+                self.keyboard_input.push(KeyboardInput::Modifier { key, pressed });
+            }
             _ => {}
         }
     }
@@ -1962,14 +1973,14 @@ mod keyboard_tests {
             }
             assert!(!state.on_key(key, Some(key), false));
             state.publish_keyboard_input();
-            let input = take_keyboard_input(&ctx, ViewportId::ROOT);
+            let input = take_keyboard_input(&ctx, ViewportId::ROOT).unwrap();
             assert_eq!(input.len(), 2);
             for (event, expected) in input.iter().zip([true, false]) {
                 assert!(matches!(event, KeyboardInput::Key(egui::Event::Key {
                     key: logical, physical_key: Some(physical), pressed, modifiers, ..
                 }) if *logical == key && *physical == key && *pressed == expected && modifiers.ctrl));
             }
-            assert!(take_keyboard_input(&ctx, ViewportId::ROOT).is_empty());
+            assert!(take_keyboard_input(&ctx, ViewportId::ROOT).is_none());
         }
         state.set_clipboard_text("local\r\ntext".into());
         state.egui_input.events.clear();
@@ -1978,23 +1989,30 @@ mod keyboard_tests {
     }
 
     #[test]
-    fn release_modifiers_keep_physical_sides_order_and_releases() {
+    fn modifiers_keep_all_physical_sides_and_pointer_order() {
         use winit::keyboard::{KeyCode, PhysicalKey};
         let ctx = egui::Context::default();
         let mut state = State::new(ctx.clone(), ViewportId::ROOT, &NoDisplay, None, None, None);
-        for code in [KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::SuperRight] {
-            state.on_release_modifier(PhysicalKey::Code(code), true);
-        }
+        let codes = [KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::AltLeft, KeyCode::SuperLeft,
+            KeyCode::ControlRight, KeyCode::ShiftRight, KeyCode::AltRight, KeyCode::SuperRight];
+        state.on_modifier(PhysicalKey::Code(KeyCode::KeyA), true);
         assert!(state.keyboard_input.is_empty());
-        for (code, pressed) in [(KeyCode::ControlRight, true), (KeyCode::AltRight, true),
-            (KeyCode::ControlRight, false), (KeyCode::AltRight, false)] {
-            state.on_release_modifier(PhysicalKey::Code(code), pressed);
+        for key in codes {
+            state.on_modifier(PhysicalKey::Code(key), true);
+            let first = state.egui_input.events.len();
+            state.pointer_pos_in_points = Some(egui::pos2(10.0, 20.0));
+            state.on_mouse_button_input(ElementState::Pressed, winit::event::MouseButton::Left);
+            state.record_pointer_events(first);
+            state.on_modifier(PhysicalKey::Code(key), false);
         }
         state.publish_keyboard_input();
-        assert!(matches!(take_keyboard_input(&ctx, ViewportId::ROOT).as_slice(), [
-            KeyboardInput::RightControl(true), KeyboardInput::RightAlt(true),
-            KeyboardInput::RightControl(false), KeyboardInput::RightAlt(false),
-        ]));
+        let events = take_keyboard_input(&ctx, ViewportId::ROOT).unwrap();
+        assert_eq!(events.len(), 24);
+        for (events, expected) in events.chunks_exact(3).zip(codes) {
+            assert!(matches!(events[0], KeyboardInput::Modifier { key, pressed: true } if key == expected));
+            assert!(matches!(events[1], KeyboardInput::Pointer(egui::Event::PointerButton { pressed: true, .. })));
+            assert!(matches!(events[2], KeyboardInput::Modifier { key, pressed: false } if key == expected));
+        }
     }
 
     #[test]
@@ -2003,14 +2021,14 @@ mod keyboard_tests {
         let mut state = State::new(ctx.clone(), ViewportId::ROOT, &NoDisplay, None, None, None);
         state.on_key(egui::Key::Plus, Some(egui::Key::Equals), true);
         state.publish_keyboard_input();
-        assert!(take_keyboard_input(&ctx, ViewportId::from_hash_of("other")).is_empty());
-        let events = take_keyboard_input(&ctx, ViewportId::ROOT);
+        assert!(take_keyboard_input(&ctx, ViewportId::from_hash_of("other")).is_none());
+        let events = take_keyboard_input(&ctx, ViewportId::ROOT).unwrap();
         assert!(matches!(events.as_slice(), [KeyboardInput::Key(egui::Event::Key {
             key: egui::Key::Plus, physical_key: Some(egui::Key::Equals), ..
         })]));
         state.on_key(egui::Key::A, Some(egui::Key::A), true);
         state.publish_keyboard_input();
         state.publish_keyboard_input();
-        assert!(take_keyboard_input(&ctx, ViewportId::ROOT).is_empty());
+        assert!(take_keyboard_input(&ctx, ViewportId::ROOT).unwrap().is_empty());
     }
 }

@@ -78,6 +78,8 @@ pub struct KeyboardReport {
 }
 
 impl KeyboardReport {
+    pub fn has_keys(&self) -> bool { !self.usages.is_empty() }
+
     pub fn set_key(&mut self, usage: u8, down: bool) {
         if down && !self.usages.contains(&usage) && self.usages.len() < 6 {
             self.usages.push(usage);
@@ -104,6 +106,9 @@ pub mod modifiers {
     pub const LEFT_SHIFT: u8 = 1 << 1;
     pub const LEFT_ALT: u8 = 1 << 2;
     pub const LEFT_SUPER: u8 = 1 << 3;
+    pub const RIGHT_CTRL: u8 = 1 << 4;
+    pub const RIGHT_SHIFT: u8 = 1 << 5;
+    pub const RIGHT_ALT: u8 = 1 << 6;
     pub const RIGHT_SUPER: u8 = 1 << 7;
 }
 

@@ -23,7 +23,7 @@ struct State {
     manager: Option<(u32, ZwpKeyboardShortcutsInhibitManagerV1)>,
     seats: BTreeMap<u32, Seat>,
     discovered: bool,
-    // shortcut: failures require restarting Focus Mode's owner; add explicit retry if recovery becomes necessary.
+    // shortcut: failures require restarting Capture's owner; add explicit retry if recovery becomes necessary.
     failure: Option<String>,
 }
 
@@ -39,7 +39,7 @@ impl Shortcuts {
     /// The display and surface must outlive this controller, including its drop.
     pub unsafe fn new(display: RawDisplayHandle, window: RawWindowHandle) -> Result<Self> {
         let (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) = (display, window) else {
-            bail!("Focus Mode requires a native Wayland window");
+            bail!("Capture requires a native Wayland window");
         };
         // eframe owns these handles; we never destroy its display or surface.
         let backend = unsafe { Backend::from_foreign_display(display.display.as_ptr().cast()) };
@@ -80,7 +80,7 @@ impl Shortcuts {
             self.state.failure = Some(error.to_string());
         }
         if self.status() == Status::Pending && self.requested.is_some_and(|start| start.elapsed() >= Duration::from_secs(2)) {
-            self.state.failure = Some("Compositor did not activate Focus Mode; use Non-Focus Mode".into());
+            self.state.failure = Some("Compositor did not activate Capture; use Non-Capture".into());
         }
         self.status()
     }
@@ -127,7 +127,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             }
             wl_registry::Event::Global { name, interface, version } if interface == wl_seat::WlSeat::interface().name => {
                 if state.seats.values().any(|seat| seat.inhibitor.is_some()) {
-                    state.failure = Some("Wayland input seats changed; Focus Mode released".into());
+                    state.failure = Some("Wayland input seats changed; Capture released".into());
                 }
                 state.seats.insert(name, Seat { proxy: registry.bind(name, version.min(5), qh, ()), inhibitor: None, active: false });
             }
@@ -135,7 +135,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 if let Some(mut seat) = state.seats.remove(&name) {
                     if let Some(inhibitor) = seat.inhibitor.take() {
                         inhibitor.destroy();
-                        state.failure = Some("Wayland input seat removed; Focus Mode released".into());
+                        state.failure = Some("Wayland input seat removed; Capture released".into());
                     }
                     if seat.proxy.version() >= 5 { seat.proxy.release(); }
                 }
@@ -162,7 +162,7 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
                 inhibitor::Event::Active => seat.active = true,
                 inhibitor::Event::Inactive => {
                     seat.active = false;
-                    state.failure = Some("Compositor restored local shortcuts; Focus Mode released".into());
+                    state.failure = Some("Compositor restored local shortcuts; Capture released".into());
                 }
                 _ => {}
             }

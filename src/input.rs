@@ -1,10 +1,8 @@
 //! HID mapping for keyboard reports and absolute pointing in the video viewport.
-//! Note: egui's Linux modifiers do NOT contain physical Super/Meta events.
-//! F12 mapping and the on-screen Super toggle supply remote Meta.
-//! Focus Mode inhibits compositor shortcuts on the viewer surface; Meta still uses the mapped path.
+//! Native modifier events preserve physical sides, including Linux Super/Meta.
 
 use eframe::egui;
-use crate::protocol::{modifiers, KeyboardReport};
+use crate::protocol::modifiers;
 
 pub fn map_key(key: egui::Key) -> Option<u8> {
     use egui::Key::*;
@@ -32,13 +30,22 @@ pub fn map_key(key: egui::Key) -> Option<u8> {
     })
 }
 
-pub fn sync_modifiers(report: &mut KeyboardReport, mod_state: egui::Modifiers, super_held: bool) -> bool {
-    let old = report.modifiers;
-    report.modifiers = (if mod_state.ctrl { modifiers::LEFT_CTRL } else { 0 })
+pub fn modifier_bit(key: egui_winit::winit::keyboard::KeyCode) -> u8 {
+    use egui_winit::winit::keyboard::KeyCode::*;
+    match key {
+        ControlLeft => modifiers::LEFT_CTRL, ControlRight => modifiers::RIGHT_CTRL,
+        ShiftLeft => modifiers::LEFT_SHIFT, ShiftRight => modifiers::RIGHT_SHIFT,
+        AltLeft => modifiers::LEFT_ALT, AltRight => modifiers::RIGHT_ALT,
+        SuperLeft => modifiers::LEFT_SUPER, SuperRight => modifiers::RIGHT_SUPER,
+        _ => 0,
+    }
+}
+
+pub fn fallback_modifiers(mod_state: egui::Modifiers) -> u8 {
+    (if mod_state.ctrl { modifiers::LEFT_CTRL } else { 0 })
         | (if mod_state.shift { modifiers::LEFT_SHIFT } else { 0 })
         | (if mod_state.alt { modifiers::LEFT_ALT } else { 0 })
-        | (if super_held { modifiers::LEFT_SUPER } else { 0 });
-    old != report.modifiers
+        | (if mod_state.mac_cmd { modifiers::LEFT_SUPER } else { 0 })
 }
 
 /// Full video aspect fits inside a window; pointer math MUST use rendered image

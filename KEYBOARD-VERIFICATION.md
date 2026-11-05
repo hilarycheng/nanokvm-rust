@@ -1,5 +1,7 @@
 # T-08 keyboard forwarding verification
 
+The T-08/T-10 records below are historical. See the [current update](#capture-and-physical-modifier-update) for approved behavior.
+
 Date: 2026-11-05 (Asia/Hong_Kong).
 
 ## Behavior and scope
@@ -106,3 +108,58 @@ Sway bindings can intercept keys before the viewer receives them; shortcut inhib
 Explicit Focus Mode and Non-Focus Mode do not yet exist. T-15 must verify mapped Meta cleanup on those transitions.
 The reserved Right-Ctrl/Right-Alt gesture also awaits T-15 implementation and verification.
 T-10 remains unchecked until that integration and hardware acceptance are complete.
+
+
+## Capture and physical modifier update
+
+Date: 2026-11-05 (Asia/Hong_Kong).
+
+The user explicitly approved Capture/Non-Capture naming instead of the names in DESIGN.md.
+DESIGN.md and AGENTS.md remain unchanged. Non-Capture retains ordinary remote input with local desktop shortcuts available.
+
+### Behavior
+
+- The mode menu has only Capture and Non-Capture. Pending compositor acknowledgement remains a transition status.
+- Capture waits for confirmed Wayland shortcut inhibition. Existing failure, revocation, and cleanup behavior remains.
+- Native KeyCode events preserve left/right Ctrl, Shift, Alt, and Super as the eight HID modifier bits.
+- Non-Capture defers unused physical modifiers until a forwarded key, click, or scroll. An unused release never synthesizes a tap.
+- Modifier changes follow an ongoing remote key or drag. Right-Ctrl/Right-Alt always wait for a subsequent remote action.
+- The simultaneous right-side release chord discards its unused prefix, including presses in separate frames and either order.
+- Both reserved keys must come up before input can resume. Escape remains a remote key.
+- F12 mapping, the Super toggle, and physical Meta maintain independent holds.
+- Empty native batches preserve physical state. Aggregate egui snapshots cannot overwrite physical sides or Meta.
+- Native pointer and keyboard events share ordering, preserving same-frame modifier-click and modifier-scroll releases.
+- Local interactions, focus loss, disconnect, and worker failures clear deferred and forwarded modifier state.
+
+### Scope and limits
+
+The existing backend patch, input mapping, HID modifier constants, app forwarding, mode labels, and regression tests changed.
+README.md and the backend patch notes describe the new behavior. No dependencies or persistent configuration were added.
+
+Non-Capture cannot classify every compositor-owned shortcut; the compositor may hide part of its event sequence.
+A modifier already used by a remote key or drag cannot be retracted. Neutral reports release input rather than undo remote actions.
+Standalone physical modifiers require Capture; reserved Right-Ctrl/Right-Alt still require a subsequent remote action in either mode.
+Explicit F12 mapping and the Super toggle retain their existing standalone behavior.
+
+Live Sway routing and NanoKVM-to-GNOME HID behavior remain unverified. Tests use queued reports and a private Wayland protocol peer.
+
+### Software verification
+
+```sh
+env -u DISPLAY -u WAYLAND_DISPLAY CARGO_HOME=/tmp/nanokvm-rust-audit.wHsm4I/cargo-home cargo test --release --locked --offline --all-targets
+env -u DISPLAY -u WAYLAND_DISPLAY CARGO_HOME=/tmp/nanokvm-rust-audit.wHsm4I/cargo-home cargo test --release --locked --offline -p egui-winit --lib
+```
+
+Results: **88 app tests passed, zero failed, two hardware/GPU tests ignored; three backend tests passed.**
+The app suite ran outside the filesystem sandbox because its private Wayland socket fixture requires socket I/O.
+DISPLAY and WAYLAND_DISPLAY were unset; tests did not connect to the running compositor or real NanoKVM devices.
+The initial restricted run failed at the fixture socket, not at shortcut activation assertions.
+
+The tests cover all eight modifier bits, both-side overlaps, unused modifier suppression, native empty frames,
+F12/physical Meta/toggle independence, same-frame click/scroll ordering, both release-chord orders across frames,
+local shortcut prefixes followed by focus loss, clipboard forwarding, mode labels, and existing lifecycle/screenshot behavior.
+The mouse fixture initializes the exact normalized position to avoid a floating-point coordinate-rounding mismatch.
+
+The offline release build passed through `./build.sh` with six existing unused-code warnings.
+The root `nanokvm-rust` executable matches `target/release/nanokvm-rust`, remains executable, and passes `--help`.
+`git diff --check` passed. AGENTS.md and DESIGN.md hashes match the pre-change snapshot.

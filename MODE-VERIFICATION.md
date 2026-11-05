@@ -1,5 +1,8 @@
 # T-15 input modes and shortcut inhibition verification
 
+Historical T-15 record. The approved Capture/Non-Capture naming and physical-modifier update supersede its input behavior.
+See [current input verification](KEYBOARD-VERIFICATION.md#capture-and-physical-modifier-update).
+
 Date: 2026-11-05 (Asia/Hong_Kong).
 
 The user approved T-15 and selected simultaneous Right-Ctrl + Right-Alt for local release.

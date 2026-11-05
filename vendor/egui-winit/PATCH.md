@@ -19,11 +19,17 @@ The new direct dependency uses the existing resolved crate, without additional t
 Keep this patch pinned until upstream exposes pre-translation keyboard input through eframe.
 Recheck the patch and its tests before upgrading egui/eframe.
 
-## T-15 right-side release keys
+## Physical modifiers and pointer ordering
 
-The native batch also carries physical Right-Control and Right-Alt presses/releases, before egui key translation.
-Left modifiers and unrelated physical keys do not produce these events.
-The existing synthetic-press filter remains in place. Window focus loss resets tracking in the viewer.
-The viewer reserves the simultaneous right-side chord for local release; aggregate modifiers alone cannot trigger it.
-Three backend tests cover clipboard preservation, batch publication, and side-specific release events.
-Wayland inhibition lives in src/shortcuts.rs in the application, not this backend patch.
+The native batch carries all eight physical Ctrl/Shift/Alt/Super presses and releases before egui translation.
+It retains KeyCode identity; HID mapping stays in the application.
+Aggregate egui modifiers remain unchanged for local widgets and never replace the native remote modifier state.
+Mouse button, motion, wheel, and pointer-leave events join the same batch in native order.
+This lets the viewer send modifier-click and modifier-scroll reports before a later modifier release in the same frame.
+
+`take_keyboard_input` returns `Some(batch)` even for an empty published frame, and `None` without a published batch.
+The distinction prevents an empty native frame from falling back to egui's lossy Linux modifier snapshot.
+The synthetic-press filter remains unchanged. Window focus loss resets tracking in the viewer.
+The viewer defers unused Right-Ctrl/Right-Alt until a remote combo, so its local release chord cannot leak its prefix.
+Backend tests cover clipboard preservation, publication, all physical modifier sides, and pointer ordering.
+Wayland inhibition lives in src/shortcuts.rs in the application.

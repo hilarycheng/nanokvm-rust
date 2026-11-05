@@ -2,11 +2,12 @@
 
 A native Linux NanoKVM USB viewer built with Rust, egui/eframe, and wgpu.
 It provides MJPEG video, serial keyboard/mouse forwarding, device and GPU color controls, and full-video or selected-area screenshots.
-Software integration checks pass; see [current verification](CONTROLS-AREA-VERIFICATION.md) and [task status](TASKS.md).
+Software integration checks pass; see [input verification](KEYBOARD-VERIFICATION.md#capture-and-physical-modifier-update),
+[controls and screenshot verification](CONTROLS-AREA-VERIFICATION.md), and [task status](TASKS.md).
 Live hardware acceptance is deferred at the user's request.
 
 The intended environment is Ubuntu with Sway → NanoKVM USB → Arch Linux with GNOME.
-Focus Mode, Non-Focus Mode, and a pinned/auto-hide toolbar are available.
+Capture, Non-Capture, and a pinned/auto-hide toolbar are available.
 Lower RAM usage than the original application has not been measured. T-13 is deferred at the user's request.
 
 ## Build and start
@@ -55,38 +56,46 @@ Failed serial writes cannot guarantee remote key release. Successful local write
 
 ## Keyboard and mouse
 
-Once serial is ready and video is available, select Capture input or click the image.
+Once serial is ready and video is available, click the image for normal Non-Capture input.
 Keyboard reports follow video focus. Clicking local controls releases held remote input and keeps local typing local.
 Pointer presses belong to video only when they start there. Releasing a video drag outside releases its remote button.
 Window focus loss clears input capture and held state.
 
-Non-Focus Mode uses normal video/local input ownership and leaves desktop shortcuts available.
-Click video or select Capture input to forward input without inhibiting desktop shortcuts.
+Non-Capture uses normal video/local input ownership and leaves desktop shortcuts available.
+Click video to forward ordinary input without inhibiting desktop shortcuts.
+Physical modifiers wait for a forwarded key or mouse action before sending.
+Unused modifiers never generate a remote tap, including when a local shortcut takes window focus.
+Modifier changes also follow an ongoing remote key or drag, except the reserved release keys.
+Standalone physical modifiers require Capture, except the reserved Right-Ctrl/Right-Alt keys, which always wait for a combo.
+F12 mapping and the explicit Super toggle remain available in either mode.
 
-Select Focus Mode to request Wayland shortcut inhibition for the viewer window.
-The app waits for compositor acknowledgement before forwarding in Focus Mode. It reports unavailable or rejected requests.
-Focus Mode requires a native Wayland window and compositor support; it is unavailable under X11/XWayland.
+Select Capture to request Wayland shortcut inhibition for the viewer window.
+The app waits for compositor acknowledgement before forwarding in Capture. It reports unavailable or rejected requests.
+Capture requires a native Wayland window and compositor support; it is unavailable under X11/XWayland.
 The compositor can retain emergency shortcuts or reject inhibition through its policy.
 
-Hold Right-Ctrl + Right-Alt together, in either order, to release input and return to Non-Focus Mode.
+Hold Right-Ctrl + Right-Alt together, in either order, to release input and return to Non-Capture.
 Release both keys before capturing again. Left-side Ctrl/Alt combinations do not trigger this shortcut.
-The first modifier can reach the remote host before the chord completes; release then requests neutral reports.
+Unused Right-Ctrl and Right-Alt stay pending in both modes, even across frames.
+They forward with a subsequent remote key, click, or scroll; completing the release chord discards pending input.
+A modifier already used in a remote combo cannot be retracted; release still requests neutral reports.
 Escape forwards as a normal remote key in both modes.
 
-Release input and the Non-Focus Mode button also clear held input while keeping devices connected.
-Click video to resume normal forwarding; select Focus Mode explicitly to inhibit shortcuts again.
-Local controls leave Focus Mode and release held input. Screenshot actions preserve Focus Mode and keyboard ownership.
-Focus loss, disconnect, worker failure, and exit release inhibition. Compositor revocation also returns to Non-Focus Mode.
-After a protocol failure or revocation, restart the viewer before requesting Focus Mode again; Non-Focus Mode remains available.
+The Non-Capture button clears held input and inhibition while keeping devices connected.
+Click video to resume normal forwarding; select Capture explicitly to inhibit shortcuts again.
+Local controls leave Capture and release held input. Screenshot actions preserve Capture and keyboard ownership.
+Focus loss, disconnect, worker failure, and exit release inhibition. Compositor revocation also returns to Non-Capture.
+After a protocol failure or revocation, restart the viewer before requesting Capture again; Non-Capture remains available.
 
-Enable F12 → Meta to use held F12 as remote Meta while video has keyboard focus.
+Native input preserves both sides of Ctrl, Shift, Alt, and Meta (Super), including Right Alt / AltGr.
+Enable F12 → Meta to use held F12 as an additional remote Left Meta source while video has keyboard focus.
 Release F12 to release its Meta hold. The Super toggle independently controls a Meta hold.
 Local interactions release the HID modifier; returning to video reapplies a selected Super toggle.
-Release input, focus loss, and disconnect clear that toggle and mapped holds.
+The release chord, Non-Capture button, focus loss, and disconnect clear that toggle and mapped holds.
 
 F12 mapping defaults off. Disable it to send ordinary F12; changing the mapping releases held remote input.
 The mapping preference lasts for the application session, including disconnect/reconnect.
-Ctrl+C/V/X, physical-key mapping, modifier ordering, and local input isolation have software regression coverage.
+Ctrl+C/V/X, all eight physical modifiers, deferred combos, mouse combo ordering, release chords, and local isolation have software regression coverage.
 Simulated Wayland protocol tests cover inhibition and cleanup. Live Sway/NanoKVM acceptance remains deferred.
 
 The centered, title-free connection bar has a straight-edged inverted trapezoid shape and one row of controls.
@@ -94,9 +103,9 @@ Pin toggles pinning for the current application session. Unpinning enables auto-
 A narrow handle remains at the top edge. Move the pointer to the top strip to reveal the bar.
 Pointer interaction, keyboard focus, and open toolbar menus keep it visible.
 Showing or hiding the bar does not resize the remote image. The bar fits the minimum 640-point window width.
-The mode menu provides Focus Mode, Non-Focus Mode, and Capture/Release input.
-PNG, WebP, Area PNG, and Area WebP remain directly available, including in Focus Mode.
-The more menu (`…`) contains Color, Super, and F12 → Meta. Opening local menus releases Focus Mode.
+The mode menu provides only Capture and Non-Capture. Waiting for compositor acknowledgement is a transition status.
+PNG, WebP, Area PNG, and Area WebP remain directly available, including in Capture.
+The more menu (`…`) contains Color, Super, and F12 → Meta. Opening local menus releases Capture.
 Fullscreen/Windowed and Disconnect use the rightmost buttons, with hover labels.
 The toolbar shows the mode and FPS or capture progress. Hover over the status for video, serial, and screenshot details.
 There is no bottom bar. Disconnect returns to the Connection dialog after cleanup.
@@ -120,15 +129,15 @@ Disconnect does not change an already requested snapshot.
 
 App exit requests cancellation within the shared shutdown deadline.
 Forced termination during a write can leave a partial new image; existing images remain protected.
-Both formats have software checks in Focus Mode and Non-Focus Mode, including capture after toolbar auto-hide/reveal.
+Both formats have software checks in Capture and Non-Capture, including capture after toolbar auto-hide/reveal.
 Use Area PNG or Area WebP to freeze the current frame, then drag the desired rectangle.
 Selection starts inside the video. Dragging beyond its edges clamps the crop to the image.
 The crop uses native image pixels, including after window resizing or letterboxing.
 Selection gestures and wheel input stay local. Starting selection releases held remote mouse buttons.
 Keyboard ownership remains unchanged while selecting or saving; remote keys still forward when video owns the keyboard.
 Cancel selection stops without saving. Empty selections and export failures open an error prompt.
-After saving, cancelling, or failing, mouse forwarding resumes only if Focus Mode remains active.
-In Non-Focus Mode, click video or use Capture input to resume explicitly.
+After saving, cancelling, or failing, mouse forwarding resumes only if Capture remains active.
+In Non-Capture, click video to resume explicitly.
 Releasing input, losing window focus, or disconnecting cancels selection and never restores old capture state.
 An export already started can finish after disconnect; it does not restore input.
 
@@ -168,7 +177,7 @@ Combined-panel software checks pass. Natural-color acceptance still needs NanoKV
 | Video or serial stops | Read the status, resolve the device problem, and reconnect manually after cleanup. |
 | Video wait timeout | A frame wait exceeding 500 ms ends the stream; the viewer does not retry that stream automatically. |
 | Connect stays disabled | Wait for both workers to stop. A driver that ignores timeouts may delay closure. |
-| Remote input does not arrive | Confirm video focus and mode status. Non-Focus Mode leaves desktop shortcuts available. |
+| Remote input does not arrive | Confirm video focus and mode status. Non-Capture leaves desktop shortcuts available. |
 | Device control fails | Read its status, use Refresh, and check whether an automatic setting disables the manual control. |
 | Screenshot or preset fails | Read the displayed cause and check the destination permissions and absolute HOME/XDG paths. |
 
