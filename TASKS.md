@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 9.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 10.
 
 **18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision delivers T-08 physical-key forwarding, clipboard shortcuts, and ordered modifiers. T-07 stays open for Focus Mode inhibition integration under T-15.
+This revision adds the T-10 F12-to-Meta mapping and software checks. T-10 stays open for T-15 mode integration and Sway hardware acceptance. T-07 also awaits T-15.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -23,6 +23,7 @@ Revision 5 adds connection lifecycle software checks; revision 6 adds automatic 
 Revision 7 verifies unexpected cleanup, idle tty hangup, and manual serial recovery with software checks.
 Revision 8 verifies video keyboard ownership, local controls, pointer release, and focus loss through egui regression checks.
 Revision 9 preserves keyboard input before clipboard translation and verifies physical keys and modifier ordering.
+Revision 10 adds optional F12-to-Meta forwarding, release checks, and a toolbar mapping control.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -39,7 +40,7 @@ Historical test results in SCOPE.md remain historical evidence.
 | Toolbar Disconnect and Fullscreen actions | Fullscreen, Connect, and Disconnect exist. Toolbar styling and modes remain open. | T-05, T-16 |
 | Manual disconnect stops video and serial; clears input; attempts neutral reports before serial closes | Both workers have cancellation and completion tracking. Shutdown bypasses queued input and attempts both neutral reports. | T-05 |
 | Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Read/write errors, video wait timeout, and idle tty probe errors initiate shared cleanup. Software checks pass; Focus Mode inhibition integration remains under T-15. | T-07, T-15 |
-| Physical Meta forwarding or another key mapped to remote Meta | Only the on-screen Super toggle exists. | T-10 |
+| Physical Meta forwarding or another key mapped to remote Meta | Optional F12-to-Meta mapping and the Super toggle supply remote Meta. Software checks pass; T-15 mode integration and Sway hardware acceptance remain open. | T-10, T-15 |
 
 Current behavior conflicts with DESIGN.md in these areas:
 
@@ -161,6 +162,10 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: Meta combinations reach the target. Releasing the physical or mapped key clears remote Meta reliably.
   - Done: mapping does not consume the reserved local release shortcut. Mode exit and focus loss clear Meta state.
   - Evidence: key-report checks and Sway hardware tests cover combinations, release, and return to local desktop input.
+  - Scope order (2026-11-05): the user approved T-10 before T-15. The mapping uses existing input ownership and cleanup; explicit mode acceptance remains pending.
+  - Result: the toolbar's optional F12 → Meta checkbox maps held F12 to remote Left Meta. It defaults off and applies only while video owns keyboard input. The Super toggle remains an independent Meta source.
+  - Result: [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md#t-10-optional-f12-to-meta-mapping) records 47 passing app tests, including four new mapping checks. Local focus, Escape, window focus loss, mapping changes, disconnect, and worker failure clear mapped state.
+  - Remaining: keep this task open until T-15 verifies mode exits and the reserved right-side release gesture. Sway/NanoKVM hardware tests must verify combinations, release, and desktop recovery. No physical Meta capture is required by the selected mapping path.
 
 ## Toolbar
 

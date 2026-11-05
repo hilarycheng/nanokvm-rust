@@ -55,6 +55,11 @@ Keyboard reports follow video focus. Clicking local controls releases held remot
 Pointer presses belong to the video only when they start there. Releasing a video drag outside the image releases its remote button.
 With video keyboard focus, Escape releases input. Release input also ends forwarding. Escape forwarding remains pending.
 
+Enable F12 → Meta in the toolbar to use held F12 as remote Meta while video has keyboard focus.
+Release F12 to release its Meta hold. The Super toggle independently holds Meta until turned off.
+The mapping defaults off at startup; turn it off to send ordinary F12. Changing the mapping releases held remote input.
+The setting lasts for the current application session, including disconnect/reconnect.
+
 Release input clears queued input and requests neutral reports while devices remain connected. Disconnect closes both device workers.
 
 ## 調色設定
@@ -68,7 +73,7 @@ Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件�
 
 ## 已知限制
 
-- 只有畫面上嘅 Super toggle。實體 Meta／Super capture 同 Wayland shortcut inhibition 未完成。
+- Optional F12 mapping and the Super toggle provide remote Meta. Physical Meta capture and Wayland shortcut inhibition remain absent.
 - Ctrl+C/V/X, Shift punctuation, and modifier ordering have software coverage under T-08. Hardware HID delivery remains unverified.
 - The pinned egui-winit patch preserves keys before clipboard translation. Recheck it before upgrading egui/eframe.
 - Local input isolation has software coverage under T-09. Focus Mode and screenshot selection integration remain pending.
@@ -92,7 +97,7 @@ cargo test --all-targets
 
 Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05, T-07, and T-09 software checks and limits.
 See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
-See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08 checks and the native input patch.
+See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08/T-10 checks, mapping limits, and the native input patch.
 
 ## Source 分工
 

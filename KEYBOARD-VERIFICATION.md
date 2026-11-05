@@ -56,5 +56,53 @@ Real NanoKVM HID delivery, Sway, and GPU rendering were **NOT RUN**.
 Existing egui key coverage and aggregate Ctrl/Alt/Shift mapping remain; this task does not add a full native HID keymap.
 The target's keyboard layout determines characters from forwarded physical usages.
 Escape still releases capture. Explicit modes, right-side modifier detection, and shortcut inhibition remain under T-15.
-Physical Meta forwarding remains under T-10. Serial failure still cannot guarantee remote release.
+T-10 selects the permitted alternate-key mapping described below. Serial failure still cannot guarantee remote release.
 Revalidate the local backend patch when upgrading egui/eframe.
+
+
+## T-10 optional F12-to-Meta mapping
+
+Date: 2026-11-05 (Asia/Hong_Kong).
+
+The user approved T-10 before T-15. This implementation selects DESIGN.md's alternate-key mapping option.
+The toolbar's F12 → Meta checkbox defaults off. It lasts for the current application session, including reconnects.
+When enabled, F12 down/up controls the remote Left Meta modifier while video owns keyboard input.
+Ordinary F12 is suppressed only in that mapping path; disabling the setting restores normal F12 reports.
+The physical key identity from T-08 determines whether a key is F12.
+
+Mapped Meta combines with Ctrl/Alt/Shift and survives empty input frames.
+Repeated F12 presses do not add reports. Releasing F12 removes its hold without clearing an independent Super toggle hold.
+Local focus, Escape, window focus loss, mapping changes, manual disconnect, and unexpected worker failure clear mapped state.
+Existing release handling still attempts neutral reports; failed serial writes cannot guarantee remote release.
+The mapping does not reinterpret Ctrl or Alt. Right-side release detection remains under T-15.
+
+### Software evidence
+
+```sh
+CARGO_HOME=/tmp/nanokvm-rust-audit.wHsm4I/cargo-home cargo test --release --locked --offline --all-targets
+CARGO_HOME=/tmp/nanokvm-rust-audit.wHsm4I/cargo-home CARGO_NET_OFFLINE=true ./build.sh
+```
+
+**47 app tests pass**, including four new checks.
+The offline release build passes with seven existing unused-code warnings.
+The root executable matches the release output, remains executable, and passes `--help`.
+
+| Check | Evidence |
+| --- | --- |
+| Default F12 and mapped combinations | Default F12 sends usage 0x45. An ordered native batch sends Meta, Ctrl+Alt+Meta, and A reports, then releases Meta while A remains held. No F12 usage leaks while mapped. |
+| Hold and toggle interaction | Empty frames preserve mapped Meta. Releasing F12 leaves an independent Super hold active; clearing the toggle releases the final hold. |
+| Ownership and release | Local clicks, Escape, and window focus loss queue neutral release and clear mapped state. A later key-up cannot restore Meta. Local F12 presses remain local. |
+| Toolbar setting changes | Real egui pointer events toggle the checkbox in both directions while F12 is held. Held input clears and ordinary F12 returns after disabling the mapping. |
+
+Existing disconnect and failure fixtures now include mapped Meta and verify that shared cleanup clears it.
+The dependency graph, backend patch, protocol mapping, and saved color configuration are unchanged.
+No new dependencies, arbitrary key selector, or mapping persistence were added.
+
+### Remaining acceptance
+
+A read-only IPC query reached Sway 1.10.1-fde480b. This establishes compositor availability, not input acceptance.
+Live Sway key delivery, NanoKVM HID output, and desktop recovery tests were **NOT RUN**.
+Sway bindings can intercept keys before the viewer receives them; shortcut inhibition is still absent.
+Explicit Focus Mode and Non-Focus Mode do not yet exist. T-15 must verify mapped Meta cleanup on those transitions.
+The reserved Right-Ctrl/Right-Alt gesture also awaits T-15 implementation and verification.
+T-10 remains unchecked until that integration and hardware acceptance are complete.

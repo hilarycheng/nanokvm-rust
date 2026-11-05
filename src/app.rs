@@ -30,6 +30,8 @@ pub struct Viewer {
     colors_open: bool,
     remote: bool,
     remote_super: bool,
+    map_f12_to_meta: bool,
+    mapped_meta_held: bool,
     fullscreen: bool,
     keyboard: KeyboardReport,
     buttons: u8,
@@ -85,6 +87,8 @@ impl Viewer {
             colors_open: false,
             remote: false,
             remote_super: false,
+            map_f12_to_meta: false,
+            mapped_meta_held: false,
             fullscreen: false,
             keyboard: KeyboardReport::default(),
             buttons: 0,
@@ -153,6 +157,7 @@ impl Viewer {
     fn clear_input(&mut self) {
         self.remote = false;
         self.remote_super = false;
+        self.mapped_meta_held = false;
         self.keyboard.release();
         self.buttons = 0;
         self.last_mouse = (0.5, 0.5);
@@ -227,6 +232,7 @@ impl Viewer {
 
     fn release_held_input(&mut self) {
         let mouse = protocol::mouse_absolute(0, self.last_mouse.0, self.last_mouse.1, 0);
+        self.mapped_meta_held = false;
         self.keyboard.release();
         self.buttons = 0;
         if self.disconnecting.is_none() {
@@ -342,13 +348,18 @@ impl Viewer {
                         if self.remote_super { "Super: ON" } else { "Super: OFF" }
                     )).clicked() {
                         self.remote_super = !self.remote_super;
-                        self.keyboard.modifiers = if self.remote_super {
+                        self.keyboard.modifiers = if self.remote_super || self.mapped_meta_held {
                             self.keyboard.modifiers | protocol::modifiers::LEFT_SUPER
                         } else {
                             self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER
                         };
                         self.send_keyboard();
                         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+                    }
+                    if ui.checkbox(&mut self.map_f12_to_meta, "F12 → Meta")
+                        .on_hover_text("Hold F12 for remote Meta while video has keyboard focus. Turn off to send F12 normally. The Super toggle can also hold Meta.")
+                        .changed() {
+                        self.release_held_input();
                     }
                     if ui.button("Color").clicked() {
                         self.release_remote();
@@ -483,10 +494,12 @@ impl Viewer {
             return;
         }
         let before = self.keyboard.bytes();
-        input::sync_modifiers(&mut self.keyboard, *modifiers, self.remote_super);
-        if let Some(usage) = input::map_key(key) {
+        if self.map_f12_to_meta && key == egui::Key::F12 {
+            self.mapped_meta_held = *pressed;
+        } else if let Some(usage) = input::map_key(key) {
             self.keyboard.set_key(usage, *pressed);
         }
+        input::sync_modifiers(&mut self.keyboard, *modifiers, self.remote_super || self.mapped_meta_held);
         if self.keyboard.bytes() != before { self.send_keyboard(); }
     }
 }
@@ -524,7 +537,7 @@ impl eframe::App for Viewer {
                 match event {
                     egui_winit::KeyboardInput::Key(event) => self.forward_key(&event),
                     egui_winit::KeyboardInput::Modifiers(modifiers) => {
-                        if input::sync_modifiers(&mut self.keyboard, modifiers, self.remote_super) {
+                        if input::sync_modifiers(&mut self.keyboard, modifiers, self.remote_super || self.mapped_meta_held) {
                             self.send_keyboard();
                         }
                     }
@@ -532,7 +545,7 @@ impl eframe::App for Viewer {
             }
         }
         // The batch snapshot applies after its ordered events, including modifier-only frames.
-        if self.remote && input::sync_modifiers(&mut self.keyboard, input.modifiers, self.remote_super) {
+        if self.remote && input::sync_modifiers(&mut self.keyboard, input.modifiers, self.remote_super || self.mapped_meta_held) {
             self.send_keyboard();
         }
         // Remote keyboard events must not also activate or edit local widgets.
@@ -630,6 +643,112 @@ mod tests {
             let Report::Keyboard(bytes) = report else { panic!("expected keyboard report"); };
             bytes
         }).collect()
+    }
+
+    #[test]
+    fn f12_mapping_preserves_native_combo_order_and_normal_f12() {
+        use egui_winit::KeyboardInput::{Key, Modifiers};
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        assert!(!app.map_f12_to_meta);
+        input_frame(&mut app, &ctx, vec![key(egui::Key::F12, true), key(egui::Key::F12, false)], &mut String::new());
+        assert_eq!(keyboard_reports(&reports), vec![[0, 0, 0x45, 0, 0, 0, 0, 0], [0; 8]]);
+        app.map_f12_to_meta = true;
+        native_keyboard_frame(&mut app, &ctx, vec![
+            Key(key(egui::Key::F12, true)), Key(key(egui::Key::F12, true)),
+            Modifiers(egui::Modifiers::CTRL | egui::Modifiers::ALT),
+            Key(egui::Event::Key { key: egui::Key::A, physical_key: Some(egui::Key::A),
+                pressed: true, repeat: false, modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT }),
+            Modifiers(egui::Modifiers::default()),
+            Key(key(egui::Key::F12, false)), Key(key(egui::Key::A, false)),
+        ], egui::RawInput::default());
+        assert_eq!(keyboard_reports(&reports), vec![
+            [8, 0, 0, 0, 0, 0, 0, 0], [13, 0, 0, 0, 0, 0, 0, 0],
+            [13, 0, 4, 0, 0, 0, 0, 0], [8, 0, 4, 0, 0, 0, 0, 0],
+            [0, 0, 4, 0, 0, 0, 0, 0], [0; 8],
+        ]);
+        assert!(!app.mapped_meta_held);
+    }
+
+    #[test]
+    fn mapped_meta_survives_frames_and_combines_with_super_toggle() {
+        let (mut app, ctx, reports) = input_viewer();
+        app.map_f12_to_meta = true;
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        input_frame(&mut app, &ctx, vec![key(egui::Key::F12, true)], &mut String::new());
+        assert_eq!(keyboard_reports(&reports), vec![[8, 0, 0, 0, 0, 0, 0, 0]]);
+        input_frame(&mut app, &ctx, vec![], &mut String::new());
+        assert!(reports.is_empty() && app.mapped_meta_held);
+        app.remote_super = true;
+        input_frame(&mut app, &ctx, vec![key(egui::Key::F12, false)], &mut String::new());
+        assert!(!app.mapped_meta_held && reports.is_empty());
+        assert_eq!(app.keyboard.modifiers, protocol::modifiers::LEFT_SUPER);
+        app.remote_super = false;
+        input_frame(&mut app, &ctx, vec![], &mut String::new());
+        assert_eq!(keyboard_reports(&reports), vec![[0; 8]]);
+    }
+
+    #[test]
+    fn mapped_meta_releases_on_local_focus_escape_and_window_focus_loss() {
+        for events in [
+            vec![pointer_button(egui::pos2(40.0, 10.0), true)],
+            vec![key(egui::Key::Escape, true)],
+            vec![egui::Event::WindowFocused(false)],
+        ] {
+            let (mut app, ctx, reports) = input_viewer();
+            app.map_f12_to_meta = true;
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            input_frame(&mut app, &ctx, vec![key(egui::Key::F12, true)], &mut String::new());
+            reports.try_iter().for_each(drop);
+            input_frame(&mut app, &ctx, events, &mut String::new());
+            assert!(!app.mapped_meta_held);
+            assert_eq!(app.keyboard.bytes(), [0; 8]);
+            assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+            assert!(reports.is_empty());
+            assert!(app.map_f12_to_meta);
+            app.remote = true;
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            input_frame(&mut app, &ctx, vec![key(egui::Key::F12, false)], &mut String::new());
+            assert!(reports.is_empty());
+        }
+        let (mut app, ctx, reports) = input_viewer();
+        app.map_f12_to_meta = true;
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("local_text")));
+        input_frame(&mut app, &ctx, vec![key(egui::Key::F12, true)], &mut String::new());
+        assert!(!app.mapped_meta_held && reports.is_empty());
+    }
+
+    #[test]
+    fn mapping_checkbox_releases_held_input_before_switching_behavior() {
+        let (mut app, ctx, reports) = input_viewer();
+        for enabled in [true, false] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0))),
+                ..Default::default()
+            };
+            let output = ctx.run(raw.clone(), |ctx| app.toolbar(ctx));
+            let pos = output.shapes.iter().find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == "F12 → Meta" { return Some(text.pos + egui::vec2(3.0, 3.0)); }
+                }
+                None
+            }).expect("mapping checkbox label");
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            app.forward_key(&key(egui::Key::F12, true));
+            reports.try_iter().for_each(drop);
+            let mut raw = egui::RawInput { events: vec![
+                egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false),
+            ], ..raw };
+            app.raw_input_hook(&ctx, &mut raw);
+            let _ = ctx.run(raw, |ctx| app.toolbar(ctx));
+            assert_eq!(app.map_f12_to_meta, enabled);
+            assert!(!app.mapped_meta_held);
+            assert_eq!(app.keyboard.bytes(), [0; 8]);
+            assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+            assert!(reports.is_empty());
+        }
+        app.forward_key(&key(egui::Key::F12, true));
+        assert_eq!(keyboard_reports(&reports), vec![[0, 0, 0x45, 0, 0, 0, 0, 0]]);
     }
 
     #[test]
@@ -921,6 +1040,8 @@ mod tests {
     fn hold_input(app: &mut Viewer) {
         app.remote = true;
         app.remote_super = true;
+        app.map_f12_to_meta = true;
+        app.mapped_meta_held = true;
         app.keyboard.set_key(4, true);
         app.keyboard.modifiers = 8;
         app.buttons = 7;
@@ -929,7 +1050,7 @@ mod tests {
     }
 
     fn assert_input_cleared(app: &Viewer) {
-        assert!(!app.remote && !app.remote_super && !app.serial_ready);
+        assert!(!app.remote && !app.remote_super && !app.mapped_meta_held && !app.serial_ready);
         assert_eq!(app.keyboard.bytes(), [0; 8]);
         assert_eq!(app.buttons, 0);
         assert!(app.image.is_none() && app.new_frame.is_none());
@@ -1121,6 +1242,8 @@ mod tests {
         app.serial = Some(serial);
         app.remote = true;
         app.remote_super = true;
+        app.map_f12_to_meta = true;
+        app.mapped_meta_held = true;
         app.serial_ready = true;
         app.keyboard.set_key(4, true);
         app.keyboard.modifiers = 8;
@@ -1131,7 +1254,8 @@ mod tests {
         app.disconnect();
         app.connect();
         assert!(app.disconnecting.is_some());
-        assert!(!app.remote && !app.remote_super && !app.serial_ready);
+        assert!(!app.remote && !app.remote_super && !app.mapped_meta_held && !app.serial_ready);
+        assert!(app.map_f12_to_meta);
         assert_eq!(app.keyboard.bytes(), [0; 8]);
         assert_eq!(app.buttons, 0);
         assert!(app.image.is_none() && app.new_frame.is_none());
