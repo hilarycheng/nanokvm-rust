@@ -6,6 +6,7 @@ use v4l::{capability::Flags, Device};
 pub struct DevicePair {
     pub video: String,
     pub serial: String,
+    pub hub: PathBuf,
 }
 
 struct Endpoint {
@@ -31,7 +32,7 @@ fn usb_parent(path: &Path) -> io::Result<Option<(PathBuf, (u16, u16))>> {
     Ok(None)
 }
 
-pub fn detect() -> Result<DevicePair, String> {
+pub fn detect() -> Result<Vec<DevicePair>, String> {
     detect_at(Path::new("/sys/class"), Path::new("/dev"), |node| {
         let caps = Device::with_path(node)?.query_caps()?;
         Ok(caps.capabilities.contains(Flags::VIDEO_CAPTURE | Flags::STREAMING))
@@ -42,7 +43,7 @@ fn detect_at(
     class_root: &Path,
     dev_root: &Path,
     capture: impl Fn(&Path) -> io::Result<bool>,
-) -> Result<DevicePair, String> {
+) -> Result<Vec<DevicePair>, String> {
     let mut videos = Vec::new();
     let mut serials = Vec::new();
     for (class, id, port, endpoints) in [
@@ -88,13 +89,28 @@ fn detect_at(
         }
     }
     match (videos.as_slice(), serials.as_slice()) {
-        ([], []) => Err("No supported NanoKVM video or serial device found".into()),
-        ([], _) => Err("NanoKVM video capture device missing".into()),
-        (_, []) => Err("NanoKVM serial device missing".into()),
-        ([video], [serial]) if video.hub == serial.hub => Ok(DevicePair { video: video.node.clone(), serial: serial.node.clone() }),
-        ([ _ ], [ _ ]) => Err("Video and serial are on different USB hubs; no pair selected".into()),
-        _ => Err("Multiple NanoKVM candidates; specify both paths manually".into()),
+        ([], []) => return Err("No supported NanoKVM video or serial device found; check the USB connection".into()),
+        ([], _) => return Err("NanoKVM video capture device missing".into()),
+        (_, []) => return Err("NanoKVM serial device missing".into()),
+        _ => {}
     }
+    let mut pairs = Vec::new();
+    for video in &videos {
+        if videos.iter().filter(|other| other.hub == video.hub).count() != 1 {
+            return Err("Multiple video capture nodes on one USB hub; specify both paths manually".into());
+        }
+        let mut matches = serials.iter().filter(|serial| serial.hub == video.hub);
+        let serial = matches.next().ok_or("Video and serial are on different USB hubs or a serial device is missing")?;
+        if matches.next().is_some() {
+            return Err("Multiple serial devices on one USB hub; specify both paths manually".into());
+        }
+        pairs.push(DevicePair { video: video.node.clone(), serial: serial.node.clone(), hub: video.hub.clone() });
+    }
+    if pairs.len() != serials.len() {
+        return Err("NanoKVM video capture device missing on a USB hub".into());
+    }
+    pairs.sort_by(|a, b| a.hub.cmp(&b.hub));
+    Ok(pairs)
 }
 
 #[cfg(test)]
@@ -105,7 +121,9 @@ mod tests {
     #[test]
     #[ignore = "requires one connected NanoKVM; queries capabilities without streaming or serial I/O"]
     fn live_single_device_discovery() {
-        let pair = detect().expect("detect the connected NanoKVM");
+        let pairs = detect().expect("detect the connected NanoKVM");
+        assert_eq!(pairs.len(), 1);
+        let pair = &pairs[0];
         assert!(Path::new(&pair.video).exists() && Path::new(&pair.serial).exists());
         println!("Detected video={} serial={}", pair.video, pair.serial);
     }
@@ -137,7 +155,7 @@ mod tests {
             self.endpoint(video, hub, "2", (0x345f, 0x2131));
             self.endpoint(serial, hub, "4", (0x1a86, 0x7523));
         }
-        fn detect(&self) -> Result<DevicePair, String> {
+        fn detect(&self) -> Result<Vec<DevicePair>, String> {
             detect_at(&self.0.join("class"), &self.0.join("dev"), |path| Ok(path.file_name().unwrap() != "video1"))
         }
     }
@@ -150,10 +168,11 @@ mod tests {
         f.endpoint("video1", "2-11", "2", (0x345f, 0x2131));
         f.endpoint("video5", "3-7", "2", (0x1111, 0x2222));
         f.endpoint("ttyUSB3", "3-7", "4", (0x1111, 0x2222));
-        assert_eq!(f.detect().unwrap(), DevicePair {
+        assert_eq!(f.detect().unwrap(), vec![DevicePair {
             video: f.0.join("dev/video0").to_string_lossy().into_owned(),
             serial: f.0.join("dev/ttyUSB0").to_string_lossy().into_owned(),
-        });
+            hub: f.0.join("devices/2-11"),
+        }]);
     }
 
     #[test]
@@ -168,18 +187,37 @@ mod tests {
     }
 
     #[test]
-    fn different_hubs_multiple_pairs_and_multiple_capture_nodes_are_ambiguous() {
+    fn multiple_pairs_keep_hub_identity_and_reject_cross_hub_or_ambiguous_endpoints() {
         let f = Fixture::new();
         f.endpoint("video0", "2-11", "2", (0x345f, 0x2131));
         f.endpoint("ttyUSB0", "2-12", "4", (0x1a86, 0x7523));
         assert!(f.detect().unwrap_err().contains("different USB hubs"));
         f.endpoint("ttyUSB2", "2-11", "4", (0x1a86, 0x7523));
         f.endpoint("video2", "2-12", "2", (0x345f, 0x2131));
-        assert!(f.detect().unwrap_err().contains("Multiple"));
+        let pairs = f.detect().unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs[0].video.ends_with("video0") && pairs[0].serial.ends_with("ttyUSB2"));
+        assert!(pairs[1].video.ends_with("video2") && pairs[1].serial.ends_with("ttyUSB0"));
+        assert_eq!(pairs[0].hub, f.0.join("devices/2-11"));
+        assert_eq!(pairs[1].hub, f.0.join("devices/2-12"));
         fs::remove_file(f.0.join("class/tty/ttyUSB0")).unwrap();
         fs::remove_file(f.0.join("class/video4linux/video2")).unwrap();
         f.endpoint("video4", "2-11", "2", (0x345f, 0x2131));
         assert!(f.detect().unwrap_err().contains("Multiple"));
+        fs::remove_file(f.0.join("class/video4linux/video4")).unwrap();
+        f.endpoint("ttyUSB4", "2-11", "4", (0x1a86, 0x7523));
+        assert!(f.detect().unwrap_err().contains("Multiple serial"));
+    }
+
+    #[test]
+    fn complete_pair_does_not_hide_an_incomplete_device() {
+        let f = Fixture::new();
+        f.pair("video0", "ttyUSB0", "2-11");
+        f.endpoint("ttyUSB2", "2-12", "4", (0x1a86, 0x7523));
+        assert!(f.detect().unwrap_err().contains("video capture device missing"));
+        fs::remove_file(f.0.join("class/tty/ttyUSB2")).unwrap();
+        f.endpoint("video2", "2-12", "2", (0x345f, 0x2131));
+        assert!(f.detect().unwrap_err().contains("serial device is missing"));
     }
 
     #[test]
@@ -193,7 +231,7 @@ mod tests {
         f.pair("video6", "ttyUSB4", "3-7");
         let new = f.detect().unwrap();
         assert_ne!(new, old);
-        assert!(new.video.ends_with("video6") && new.serial.ends_with("ttyUSB4"));
+        assert!(new[0].video.ends_with("video6") && new[0].serial.ends_with("ttyUSB4"));
     }
 
     #[test]

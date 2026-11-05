@@ -36,15 +36,18 @@ Use `./nanokvm-rust --help` for CLI usage.
 
 ## Connect and disconnect
 
-The app starts with a Connection dialog and automatically scans for the supported NanoKVM USB layout.
-Connect stays disabled until a pair is found. Retry rescans without starting a session.
-Select Connect to rescan and start video plus serial. The dialog stays open until video and serial are ready.
-Missing devices remain in the dialog with a USB connection hint and Retry; the app never guesses a pair.
+The app scans for the supported NanoKVM USB layout at startup and automatically connects a single valid pair.
+Scanning and connecting show progress on the main screen without a Connection dialog.
+Multiple valid pairs open a selection dialog showing each pair's video and serial paths.
+Select a pair to connect. A fresh scan confirms its paths and USB hub before opening either worker.
+Missing devices, incomplete or ambiguous pairs, scan failures, and connection failures open an error prompt.
+After acknowledging an error, select Connect on the offline screen to try again.
+Cancel stops a pending connection or dismisses device selection without connecting.
 The viewer requests 1920×1080 MJPG and uses the negotiated dimensions. Serial reports use 57,600 baud.
 
 Automatic pairing supports the [recorded USB identity and topology](DEVICE-IDENTIFICATION.md).
-The dialog has no device selector or manual path fields. For unsupported layouts, the existing
-`--video PATH --serial PATH` CLI options still select manual mode. Device paths can change after reconnection; verify them before connecting manually.
+For unsupported layouts, `--video PATH --serial PATH` connects directly in manual mode. Both paths are required.
+Device paths can change after reconnection; verify them before connecting manually.
 
 Disconnect clears local input and video, stops both workers, and attempts neutral keyboard and mouse reports before serial closes.
 Either worker failing initiates the same cleanup. The app never reconnects automatically.
@@ -98,17 +101,22 @@ The mapping preference lasts for the application session, including disconnect/r
 Ctrl+C/V/X, all eight physical modifiers, deferred combos, mouse combo ordering, release chords, and local isolation have software regression coverage.
 Simulated Wayland protocol tests cover inhibition and cleanup. Live Sway/NanoKVM acceptance remains deferred.
 
-The centered, title-free connection bar has a straight-edged inverted trapezoid shape and one row of controls.
+The centered, title-free connection bar has a straight-edged inverted trapezoid shape and one row of icons.
+Hover labels and accessibility labels name each action. Menu items retain their text labels.
 Pin toggles pinning for the current application session. Unpinning enables auto-hide after 0.7 seconds outside the bar.
 A narrow handle remains at the top edge. Move the pointer to the top strip to reveal the bar.
 Pointer interaction, keyboard focus, and open toolbar menus keep it visible.
 Showing or hiding the bar does not resize the remote image. The bar fits the minimum 640-point window width.
 The mode menu provides only Capture and Non-Capture. Waiting for compositor acknowledgement is a transition status.
-PNG, WebP, Area PNG, and Area WebP remain directly available, including in Capture.
+PNG (`📷`), WebP (`🖼`), Area PNG (`✂`), and Area WebP (`⊞`) remain directly available, including in Capture.
 The more menu (`…`) contains Color, Super, and F12 → Meta. Opening local menus releases Capture.
-Fullscreen/Windowed and Disconnect use the rightmost buttons, with hover labels.
-The toolbar shows the mode and FPS or capture progress. Hover over the status for video, serial, and screenshot details.
-There is no bottom bar. Disconnect returns to the Connection dialog after cleanup.
+Fullscreen/Windowed and Close (`×`) use the rightmost buttons, with hover labels.
+Close exits the app through normal device cleanup instead of returning to the Connection dialog.
+Hover over the keyboard icon for the input mode; hover over the information icon for FPS, capture progress, and device details.
+There is no bottom bar. The reveal strip overlays the video without reserving layout space.
+Video has no panel margins in windowed or fullscreen mode and fits the current window while preserving its aspect ratio.
+The fullscreen button follows the system's fullscreen state, including changes made through the window manager.
+Matching capture and physical screen dimensions render at 1:1 in fullscreen, underneath the toolbar overlay.
 Errors show an acknowledgement prompt and release remote input before local interaction.
 Normal connection and screenshot status updates do not open prompts.
 Screenshot actions are disabled without a frame or while an export is running.

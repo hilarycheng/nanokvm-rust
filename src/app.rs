@@ -30,8 +30,9 @@ pub struct Viewer {
     video_path: String,
     automatic: bool,
     discovery_status: String,
-    discovery_rx: Option<Receiver<Result<DevicePair, String>>>,
-    connect_after_discovery: bool,
+    discovery_rx: Option<Receiver<Result<Vec<DevicePair>, String>>>,
+    candidates: Vec<DevicePair>,
+    pending_selection: Option<DevicePair>,
     disconnecting: Option<Instant>,
     serial: Option<SerialHandle>,
     serial_path: String,
@@ -112,8 +113,8 @@ impl Viewer {
             Ok(shortcuts) => app.shortcuts = Some(shortcuts),
             Err(error) => app.mode_status = error.to_string(),
         }
+        app.connect();
         app.restore_colors(config_path().as_deref());
-        if app.automatic { app.discover(false); }
         app
     }
 
@@ -123,7 +124,8 @@ impl Viewer {
             automatic: opts.video.trim().is_empty() && opts.serial.trim().is_empty(),
             discovery_status: "Disconnected".into(),
             discovery_rx: None,
-            connect_after_discovery: false,
+            candidates: Vec::new(),
+            pending_selection: None,
             video_path: opts.video,
             disconnecting: None,
             serial: None,
@@ -181,12 +183,13 @@ impl Viewer {
         }
     }
 
-    fn discover(&mut self, connect: bool) {
+    fn discover(&mut self, selected: Option<DevicePair>) {
         if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() || self.discovery_rx.is_some() { return; }
         self.video_path.clear();
         self.serial_path.clear();
         self.discovery_status = "Looking for NanoKVM…".into();
-        self.connect_after_discovery = connect;
+        self.candidates.clear();
+        self.pending_selection = selected;
         let (tx, rx) = bounded(1);
         self.discovery_rx = Some(rx);
         std::thread::spawn(move || { let _ = tx.send(discovery::detect()); });
@@ -200,34 +203,50 @@ impl Viewer {
             Err(crossbeam_channel::TryRecvError::Disconnected) => Err("Device discovery stopped unexpectedly; rescan".into()),
         };
         self.discovery_rx = None;
-        let connect = std::mem::take(&mut self.connect_after_discovery);
+        let selected = self.pending_selection.take();
+        let result = result.and_then(|pairs| {
+            if pairs.is_empty() { return Err("No supported NanoKVM pair found; check the USB connection".into()); }
+            match selected {
+                Some(pair) if pairs.contains(&pair) => Ok(vec![pair]),
+                Some(_) => Err("The selected NanoKVM changed or disappeared; select Connect to scan again".into()),
+                None => Ok(pairs),
+            }
+        });
         match result {
-            Ok(pair) => {
+            Ok(mut pairs) if pairs.len() == 1 => {
+                let pair = pairs.remove(0);
                 self.video_path = pair.video;
                 self.serial_path = pair.serial;
                 self.discovery_status = "NanoKVM found".into();
-                if connect { self.connect_paths(); }
+                self.connect_paths();
+            }
+            Ok(pairs) => {
+                self.discovery_status = "Select a NanoKVM to connect".into();
+                self.candidates = pairs;
             }
             Err(error) => {
                 self.video_path.clear();
                 self.serial_path.clear();
-                self.discovery_status = error;
+                self.candidates.clear();
+                self.discovery_status = error.clone();
+                self.report_error(error);
             }
         }
     }
 
     fn connect(&mut self) {
         if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() || self.discovery_rx.is_some() { return; }
-        if self.automatic { self.discover(true); } else { self.connect_paths(); }
+        self.error = None;
+        if self.automatic { self.discover(None); } else { self.connect_paths(); }
     }
 
     fn connect_paths(&mut self) {
         if self.video_path.trim().is_empty() || self.serial_path.trim().is_empty() {
-            self.video_status = "Set both Video and Serial paths before connecting".into();
+            self.video_status = "Provide both --video and --serial paths before connecting".into();
+            self.report_error(self.video_status.clone());
             return;
         }
         self.device_controls.clear();
-        self.error = None;
         self.device_control_pending = true;
         self.device_control_status = "Reading device controls…".into();
         self.camera = Some(capture::spawn(self.video_path.trim().to_owned()));
@@ -263,7 +282,8 @@ impl Viewer {
 
     fn disconnect(&mut self) {
         self.discovery_rx = None;
-        self.connect_after_discovery = false;
+        self.candidates.clear();
+        self.pending_selection = None;
         self.discovery_status = "Disconnected".into();
         self.device_controls.clear();
         self.colors_open = false;
@@ -651,38 +671,24 @@ impl Viewer {
     }
 
     fn connection_dialog(&mut self, ctx: &egui::Context) {
-        if self.image.is_some() && self.serial_ready && self.disconnecting.is_none() { return; }
+        if self.candidates.len() < 2 || self.error.is_some() { return; }
+        let mut selected = None;
         egui::Modal::new(egui::Id::new("connection_config")).show(ctx, |ui| {
             ui.set_width(340.0);
-            ui.heading("Connection");
+            ui.heading("Select NanoKVM");
             ui.add_space(8.0);
-            let busy = self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some();
-            let scanning = self.discovery_rx.is_some();
-            let ready = !self.video_path.is_empty() && !self.serial_path.is_empty();
-            if busy {
-                ui.spinner();
-                ui.label(&self.video_status);
-                ui.label(&self.serial_status);
-                if ui.button("Cancel").clicked() { self.disconnect(); }
-            } else {
-                if scanning {
-                    ui.spinner();
-                    ui.label("Searching for NanoKVM…");
-                } else if ready {
-                    ui.label("NanoKVM is ready to connect.");
-                } else {
-                    ui.label("NanoKVM not found. Check the USB connection and retry.");
+            ui.label("Select a device to connect.");
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for (index, pair) in self.candidates.iter().enumerate() {
+                    if ui.button(format!("{} + {}", pair.video, pair.serial)).clicked() { selected = Some(index); }
                 }
-                ui.small(&self.discovery_status);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!scanning, egui::Button::new("Retry")).clicked() {
-                        self.automatic = true;
-                        self.discover(false);
-                    }
-                    if ui.add_enabled(!scanning && ready, egui::Button::new("Connect")).clicked() { self.connect(); }
-                });
-            }
+            });
+            if ui.button("Cancel").clicked() { selected = None; self.disconnect(); }
         });
+        if let Some(index) = selected {
+            let pair = self.candidates.remove(index);
+            self.discover(Some(pair));
+        }
     }
 
     fn error_dialog(&mut self, ctx: &egui::Context) {
@@ -699,6 +705,7 @@ impl Viewer {
     }
 
     fn toolbar(&mut self, ctx: &egui::Context) {
+        self.fullscreen = ctx.input(|input| input.viewport().fullscreen).unwrap_or(self.fullscreen);
         let now = ctx.input(|input| input.time);
         let strip = Self::toolbar_strip(ctx);
         let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("rdp_toolbar"));
@@ -718,18 +725,13 @@ impl Viewer {
         self.area_buttons = [None; 2];
         self.area_cancel_button = None;
         let blue = egui::Color32::from_rgb(32, 77, 112);
-        // Reserve only the reveal strip so showing the bar never resizes the remote image.
-        egui::TopBottomPanel::top("toolbar_reveal").exact_height(6.0)
-            .frame(egui::Frame::NONE).show(ctx, |ui| {
-                let rect = ui.max_rect();
-                let handle = egui::Rect::from_center_size(rect.center(), egui::vec2(80.0, 6.0));
-                ui.painter().rect_filled(handle, 0.0, blue);
-                ui.interact(rect, ui.id().with("reveal"), egui::Sense::hover()).on_hover_text("Show remote desktop toolbar");
-            });
+        // Overlay the reveal handle so it never takes space from the video.
+        let handle = egui::Rect::from_center_size(strip.center(), egui::vec2(80.0, 6.0));
+        ctx.layer_painter(layer).rect_filled(handle, 0.0, blue);
         self.toolbar_rect = None;
         if !self.toolbar_visible { return; }
         self.toolbar_menu_open = false;
-        let width = (ctx.screen_rect().width() - 16.0).min(660.0).max(280.0);
+        let width = (ctx.screen_rect().width() - 16.0).min(360.0).max(280.0);
         let response = egui::Area::new(layer.id).order(layer.order).movable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::Vec2::ZERO).default_width(width)
             .show(ctx, |ui| {
@@ -742,7 +744,9 @@ impl Viewer {
                     .show(ui, |ui| {
                         ui.set_width(width - 36.0);
                         ui.horizontal(|ui| {
-                            if ui.selectable_label(self.toolbar_pinned, "Pin").on_hover_text("Pin toolbar / auto-hide").clicked() {
+                            let pin = ui.selectable_label(self.toolbar_pinned, "📌").on_hover_text("Pin toolbar / auto-hide");
+                            pin.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, self.toolbar_pinned, "Pin toolbar"));
+                            if pin.clicked() {
                                 self.toolbar_pinned = !self.toolbar_pinned;
                                 self.toolbar_last_hover = now;
                             }
@@ -751,7 +755,7 @@ impl Viewer {
                                 InputMode::Pending => "Waiting…",
                                 InputMode::NonCapture => "Non-Capture",
                             };
-                            let menu = ui.menu_button(mode, |ui| {
+                            let menu = ui.menu_button("⌨", |ui| {
                                 self.toolbar_menu_open = true;
                                 let available = self.serial_ready && self.image.is_some() && !self.release_chord_held
                                     && !(self.right_ctrl && self.right_alt) && !self.input_blocked
@@ -764,27 +768,31 @@ impl Viewer {
                                 ui.small(&self.mode_status);
                                 ui.small("Right-Ctrl + Right-Alt releases input.");
                             });
-                            menu.response.on_hover_text(&self.mode_status);
+                            menu.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Input mode: {mode}")));
+                            menu.response.on_hover_text(format!("{mode}\n{}", self.mode_status));
                             ui.separator();
-                            for (index, format, label) in [(0, Format::Png, "PNG"), (1, Format::WebP, "WebP")] {
-                                let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(label))
-                                    .on_hover_text("Save the complete video at native resolution, before GPU tuning. WebP is lossless.");
+                            for (index, format, icon, label) in [(0, Format::Png, "📷", "Save PNG"), (1, Format::WebP, "🖼", "Save WebP")] {
+                                let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(icon))
+                                    .on_hover_text(format!("{label}\nSave the complete video at native resolution, before GPU tuning. WebP is lossless."));
+                                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label));
                                 self.screenshot_buttons[index] = Some(response.id);
                                 if response.clicked() { self.take_screenshot(format); }
                             }
                             if self.selection.is_some() {
-                                let response = ui.button("Cancel selection");
+                                let response = ui.button("🚫").on_hover_text("Cancel selection");
+                                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Cancel selection"));
                                 self.area_cancel_button = Some(response.id);
                                 if response.clicked() { self.finish_area(); self.screenshot_status = "Area selection cancelled".into(); }
                             } else {
-                                for (index, format, label) in [(0, Format::Png, "Area PNG"), (1, Format::WebP, "Area WebP")] {
-                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(label))
-                                        .on_hover_text("Select part of a frozen video frame. Remote mouse pauses until capture finishes.");
+                                for (index, format, icon, label) in [(0, Format::Png, "✂", "Area PNG"), (1, Format::WebP, "⊞", "Area WebP")] {
+                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(icon))
+                                        .on_hover_text(format!("{label}\nSelect part of a frozen video frame. Remote mouse pauses until capture finishes."));
+                                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label));
                                     self.area_buttons[index] = Some(response.id);
                                     if response.clicked() { self.start_area(format); }
                                 }
                             }
-                            ui.menu_button("…", |ui| {
+                            let more = ui.menu_button("…", |ui| {
                                 self.toolbar_menu_open = true;
                                 if ui.button("Color").clicked() {
                                     self.release_remote();
@@ -806,14 +814,14 @@ impl Viewer {
                                     self.release_held_input();
                                 }
                             });
+                            more.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "More options"));
+                            more.response.on_hover_text("More options");
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let active = self.camera.is_some() || self.serial.is_some();
-                                let disconnect = ui.add_enabled(active && self.disconnecting.is_none(), egui::Button::new("×"))
-                                    .on_hover_text("Disconnect");
-                                disconnect.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, disconnect.enabled(), "Disconnect"));
-                                if disconnect.clicked() { self.disconnect(); }
+                                let close = ui.button("×").on_hover_text("Close");
+                                close.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Close"));
+                                if close.clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
                                 let fullscreen_label = if self.fullscreen { "Windowed" } else { "Fullscreen" };
-                                let fullscreen = ui.button(if self.fullscreen { "❐" } else { "□" }).on_hover_text(fullscreen_label);
+                                let fullscreen = ui.button(if self.fullscreen { "🗖" } else { "⛶" }).on_hover_text(fullscreen_label);
                                 fullscreen.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, fullscreen_label));
                                 if fullscreen.clicked() {
                                     self.fullscreen = !self.fullscreen;
@@ -823,7 +831,8 @@ impl Viewer {
                                     else if self.screenshot.is_some() { "Saving…".into() }
                                     else if self.image.is_some() && self.serial_ready { format!("{:.0} FPS", self.fps) }
                                     else { "Offline".into() };
-                                ui.small(status).on_hover_text(format!("{}\n{}\n{}", self.video_status, self.serial_status, self.screenshot_status));
+                                let indicator = ui.label("ℹ").on_hover_text(format!("{status}\n{}\n{}\n{}", self.video_status, self.serial_status, self.screenshot_status));
+                                indicator.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &status));
                             });
                         });
                     });
@@ -843,9 +852,26 @@ impl Viewer {
     }
 
     fn render_video(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.image.is_none() {
-                ui.centered_and_justified(|ui| { ui.label("No video frame — connect devices to start"); });
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill)).show(ctx, |ui| {
+            if self.image.is_none() || !self.serial_ready {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 3.0);
+                    if self.discovery_rx.is_some() {
+                        ui.spinner();
+                        ui.label(&self.discovery_status);
+                        if ui.button("Cancel").clicked() { self.disconnect(); }
+                    } else if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() {
+                        ui.spinner();
+                        ui.label(&self.video_status);
+                        ui.label(&self.serial_status);
+                        if self.disconnecting.is_none() && ui.button("Cancel").clicked() { self.disconnect(); }
+                    } else {
+                        ui.label(&self.discovery_status);
+                        if self.candidates.is_empty() && ui.add_enabled(self.error.is_none(), egui::Button::new("Connect")).clicked() {
+                            self.connect();
+                        }
+                    }
+                });
                 return;
             }
             let outer = ui.available_rect_before_wrap();
@@ -1882,33 +1908,148 @@ mod tests {
     }
 
     #[test]
-    fn connection_dialog_disables_connect_until_discovery_succeeds_and_hides_when_ready() {
+    fn single_device_startup_has_no_dialog_during_scan_connect_or_disconnect() {
         let mut app = Viewer::disconnected(Options { video: String::new(), serial: String::new() });
         let ctx = egui::Context::default();
         let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))), ..Default::default() };
-        for result in [Err("No supported NanoKVM video or serial device found".into()), Ok(detected_pair())] {
-            let ready = result.is_ok();
-            discovery_result(&mut app, false, result);
-            app.refresh_discovery();
-            for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)); }
-            let output = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx));
-            label_position(&output, "Connection");
-            label_position(&output, "Retry");
-            let pos = label_position(&output, "Connect");
-            if !ready {
-                let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
-                let _ = ctx.run(input, |ctx| app.connection_dialog(ctx));
-                assert!(app.discovery_rx.is_none() && app.camera.is_none() && app.serial.is_none());
-                assert!(app.error.is_none(), "not-found belongs in the config dialog");
+        let (tx, rx) = bounded(1);
+        app.discovery_rx = Some(rx);
+        assert!(ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)).shapes.is_empty());
+        tx.send(Ok(vec![detected_pair(6)])).unwrap();
+        app.refresh_discovery();
+        assert!(app.camera.is_some() && app.serial.is_some());
+        assert!(!app.remote && app.error.is_none());
+        assert!(ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)).shapes.is_empty());
+        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0; 4] }));
+        let output = ctx.run(raw.clone(), |ctx| app.render_video(ctx));
+        label_position(&output, "Connecting…");
+        label_position(&output, "Cancel");
+        app.serial_ready = true;
+        assert!(ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)).shapes.is_empty());
+        app.disconnect();
+        assert!(ctx.run(raw, |ctx| app.connection_dialog(ctx)).shapes.is_empty());
+        wait_disconnected(&mut app);
+    }
+
+    #[test]
+    fn multiple_devices_show_choices_without_opening_workers_and_cancel_returns_offline() {
+        let mut app = Viewer::disconnected(Options { video: String::new(), serial: String::new() });
+        discovery_result(&mut app, Ok(vec![detected_pair(6), detected_pair(7)]));
+        app.refresh_discovery();
+        assert!(app.camera.is_none() && app.serial.is_none() && app.error.is_none());
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() };
+        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)); }
+        let output = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx));
+        label_position(&output, "Select NanoKVM");
+        for pair in &app.candidates { label_position(&output, &format!("{} + {}", pair.video, pair.serial)); }
+        let pos = label_position(&output, "Cancel");
+        let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
+        let _ = ctx.run(input, |ctx| app.connection_dialog(ctx));
+        assert!(app.candidates.is_empty() && app.discovery_rx.is_none());
+        assert!(app.camera.is_none() && app.serial.is_none());
+        let output = ctx.run(raw, |ctx| { app.connection_dialog(ctx); app.render_video(ctx); });
+        label_position(&output, "Connect");
+    }
+
+    #[test]
+    fn missing_device_error_acknowledges_once_and_offline_connect_can_retry() {
+        let mut app = viewer();
+        let message = "No supported NanoKVM video or serial device found";
+        discovery_result(&mut app, Err(message.into()));
+        app.refresh_discovery();
+        assert!(app.camera.is_none() && app.serial.is_none());
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() };
+        assert!(ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)).shapes.is_empty());
+        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.error_dialog(ctx)); }
+        let output = ctx.run(raw.clone(), |ctx| app.error_dialog(ctx));
+        label_position(&output, "Error");
+        label_position(&output, message);
+        let pos = label_position(&output, "OK");
+        let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
+        let _ = ctx.run(input, |ctx| app.error_dialog(ctx));
+        assert!(app.error.is_none());
+        app.refresh_messages();
+        assert!(ctx.run(raw.clone(), |ctx| { app.connection_dialog(ctx); app.error_dialog(ctx); }).shapes.is_empty());
+        // Retry with unavailable manual paths so the UI test never scans or opens physical hardware.
+        app.video_path = detected_pair(6).video;
+        app.serial_path = detected_pair(6).serial;
+        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.render_video(ctx)); }
+        let output = ctx.run(raw.clone(), |ctx| app.render_video(ctx));
+        let pos = label_position(&output, "Connect");
+        let input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)], ..raw };
+        let _ = ctx.run(input, |ctx| app.render_video(ctx));
+        assert!(app.camera.is_some() && app.serial.is_some());
+        wait_disconnected(&mut app);
+    }
+
+    #[test]
+    fn fullscreen_matching_video_fills_physical_screen_with_toolbar_visible_or_hidden() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (mut app, ctx, _) = input_viewer();
+            app.toolbar_pinned = false;
+            app.image = Some(Arc::new(RgbaFrame { width: 1920, height: 1080, rgba: vec![0; 1920 * 1080 * 4] }));
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0) / scale);
+            for (time, visible) in [(0.1, true), (1.0, false), (1.1, true)] {
+                let mut raw = egui::RawInput { screen_rect: Some(screen), time: Some(time),
+                    events: if visible { vec![egui::Event::PointerMoved(egui::pos2(screen.center().x, 2.0))] }
+                        else { vec![egui::Event::PointerGone] }, ..Default::default() };
+                let viewport = raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+                viewport.native_pixels_per_point = Some(scale);
+                viewport.fullscreen = Some(true);
+                for _ in 0..3 {
+                    let _ = ctx.run(raw.clone(), |ctx| {
+                        app.toolbar(ctx);
+                        assert_eq!(ctx.available_rect(), screen, "overlay must not reserve video space");
+                        app.render_video(ctx);
+                    });
+                }
+                assert_eq!(app.toolbar_visible, visible);
+                assert!(app.fullscreen);
+                let video = ctx.read_response(egui::Id::new("video")).unwrap().rect;
+                assert_eq!(video, screen);
+                assert_eq!(video.size() * ctx.pixels_per_point(), egui::vec2(1920.0, 1080.0));
             }
         }
-        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0; 4] }));
-        app.serial_ready = true;
-        let output = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx));
-        assert!(output.shapes.is_empty(), "connected sessions must not show config");
-        app.disconnect();
-        for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| app.connection_dialog(ctx)); }
-        label_position(&ctx.run(raw, |ctx| app.connection_dialog(ctx)), "Connection");
+    }
+
+    #[test]
+    fn external_fullscreen_and_window_resize_keep_video_margin_free() {
+        let (mut app, ctx, _) = input_viewer();
+        app.image = Some(Arc::new(RgbaFrame { width: 1920, height: 1080, rgba: vec![0; 1920 * 1080 * 4] }));
+        for (fullscreen, size) in [(false, egui::vec2(960.0, 540.0)),
+            (true, egui::vec2(1920.0, 1080.0)), (false, egui::vec2(1280.0, 720.0))] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut raw = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(fullscreen);
+            for _ in 0..3 { let _ = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); }); }
+            assert_eq!(app.fullscreen, fullscreen);
+            assert_eq!(ctx.read_response(egui::Id::new("video")).unwrap().rect, screen);
+            let output = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+            label_position(&output, if fullscreen { "🗖" } else { "⛶" });
+        }
+    }
+
+    #[test]
+    fn toolbar_close_requests_app_exit_without_opening_connection_dialog() {
+        for connected in [false, true] {
+            let (mut app, ctx, _) = input_viewer();
+            if !connected { app.disconnect(); }
+            let size = egui::vec2(800.0, 600.0);
+            for _ in 0..3 { toolbar_frame(&mut app, &ctx, size, 0.0, vec![]); }
+            let output = toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
+            let pos = label_position(&output, "×");
+            let output = toolbar_frame(&mut app, &ctx, size, 0.1,
+                vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
+            assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|command|
+                matches!(command, egui::ViewportCommand::Close)));
+            if connected {
+                assert!(app.image.is_some() && app.serial_ready && app.disconnecting.is_none());
+                let output = ctx.run(egui::RawInput::default(), |ctx| app.connection_dialog(ctx));
+                assert!(output.shapes.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1925,6 +2066,13 @@ mod tests {
             }
             assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text)
                 if ["NanoKVM USB", "Automatic devices", "Video:", "Serial:"].contains(&text.galley.text()))));
+            for shape in &output.shapes {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    assert!(!text.galley.text().chars().any(|c| c.is_ascii_alphanumeric()), "toolbar must show only icons");
+                    assert!(ctx.fonts(|fonts| fonts.has_glyphs(&egui::FontId::proportional(14.0), text.galley.text())),
+                        "missing toolbar glyph: {}", text.galley.text());
+                }
+            }
             let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), ..Default::default() };
             let _ = ctx.run(raw, |ctx| {
                 app.toolbar(ctx);
@@ -1964,7 +2112,7 @@ mod tests {
             let rect = app.toolbar_rect.unwrap();
             assert!(rect.left() >= 0.0 && rect.right() <= size.x && rect.top() >= 0.0 && rect.bottom() < size.y);
             let video = ctx.read_response(egui::Id::new("video")).unwrap().rect;
-            let pin = label_position(&output, "Pin");
+            let pin = label_position(&output, "📌");
             toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
             assert!(!app.toolbar_pinned && app.toolbar_visible);
             reports.try_iter().for_each(drop);
@@ -1981,7 +2129,7 @@ mod tests {
             let output = toolbar_frame(&mut app, &ctx, size, 1.3, vec![]);
             assert_eq!(ctx.read_response(egui::Id::new("video")).unwrap().rect, video);
             assert!(reports.is_empty(), "reveal motion must stay local");
-            let pin = label_position(&output, "Pin");
+            let pin = label_position(&output, "📌");
             toolbar_frame(&mut app, &ctx, size, 1.4, vec![egui::Event::PointerMoved(pin), pointer_button(pin, true), pointer_button(pin, false)]);
             assert!(app.toolbar_pinned);
             toolbar_frame(&mut app, &ctx, size, 3.0, vec![egui::Event::PointerGone]);
@@ -2057,13 +2205,13 @@ mod tests {
         toolbar_frame(&mut app, &ctx, size, 0.0, vec![]);
         let output = toolbar_frame(&mut app, &ctx, size, 0.1, vec![]);
         for id in app.screenshot_buttons.iter().flatten() { assert!(!ctx.read_response(*id).unwrap().enabled()); }
-        for label in ["×", "Area PNG", "Area WebP", "PNG", "WebP"] {
+        for label in ["✂", "⊞", "📷", "🖼"] {
             let pos = label_position(&output, label);
             toolbar_frame(&mut app, &ctx, size, 0.2, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
             assert_eq!(app.mode, InputMode::NonCapture);
             assert!(app.screenshot.is_none() && app.camera.is_none() && app.serial.is_none());
         }
-        for (label, expected) in [("□", true), ("❐", false)] {
+        for (label, expected) in [("⛶", true), ("🗖", false)] {
             let output = toolbar_frame(&mut app, &ctx, size, 0.3, vec![]);
             let pos = label_position(&output, label);
             let output = toolbar_frame(&mut app, &ctx, size, 0.4, vec![egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false)]);
@@ -2478,6 +2626,7 @@ mod tests {
         let (mut app, ctx, reports) = input_viewer();
         let rect = ctx.read_response(egui::Id::new("video")).unwrap().rect;
         let point = rect.center();
+        let expected = input::normalized_point(rect, point);
         app.last_mouse = (0.0, 0.0);
         app.next_mouse_update = Instant::now() + Duration::from_secs(1);
         input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(point)], &mut String::new());
@@ -2485,7 +2634,7 @@ mod tests {
         app.next_mouse_update = Instant::now();
         input_frame(&mut app, &ctx, vec![], &mut String::new());
         let Report::AbsoluteMouse(bytes) = reports.try_recv().unwrap() else { panic!("expected mouse motion"); };
-        assert_eq!(bytes, protocol::mouse_absolute(0, 0.5, 0.5, 0));
+        assert_eq!(bytes, protocol::mouse_absolute(0, expected.0, expected.1, 0));
         assert!(reports.is_empty());
     }
 
@@ -2667,60 +2816,82 @@ mod tests {
         assert!(app.serial_status.contains("Serial open failed"));
     }
 
-    fn discovery_result(app: &mut Viewer, connect: bool, result: Result<DevicePair, String>) {
+    fn discovery_result(app: &mut Viewer, result: Result<Vec<DevicePair>, String>) {
         let (tx, rx) = bounded(1);
         app.discovery_rx = Some(rx);
-        app.connect_after_discovery = connect;
         tx.send(result).unwrap();
     }
 
-    fn detected_pair() -> DevicePair {
+    fn detected_pair(index: usize) -> DevicePair {
         DevicePair {
-            video: "/nonexistent-nanokvm-t06/video6".into(),
-            serial: "/nonexistent-nanokvm-t06/ttyUSB4".into(),
+            video: format!("/nonexistent-nanokvm-t06/video{index}"),
+            serial: format!("/nonexistent-nanokvm-t06/ttyUSB{index}"),
+            hub: PathBuf::from(format!("/sys/devices/test-hub-{index}")),
         }
     }
 
     #[test]
-    fn discovery_alone_updates_paths_without_starting_workers() {
+    fn single_device_discovery_connects_without_clearing_other_startup_errors() {
         let mut app = Viewer::disconnected(Options { video: String::new(), serial: String::new() });
         assert!(app.automatic);
-        discovery_result(&mut app, false, Ok(detected_pair()));
+        app.error = Some("Could not load GPU preset".into());
+        discovery_result(&mut app, Ok(vec![detected_pair(6)]));
         app.refresh_discovery();
-        assert!(app.camera.is_none() && app.serial.is_none());
-        assert!(app.video_path.ends_with("video6") && app.serial_path.ends_with("ttyUSB4"));
-        assert!(app.discovery_rx.is_none() && !app.connect_after_discovery);
+        assert!(app.camera.is_some() && app.serial.is_some());
+        assert!(app.video_path.ends_with("video6") && app.serial_path.ends_with("ttyUSB6"));
+        assert_eq!(app.error.as_deref(), Some("Could not load GPU preset"));
+        assert!(app.discovery_rx.is_none() && app.pending_selection.is_none());
+        wait_disconnected(&mut app);
     }
 
     #[test]
-    fn explicit_connect_uses_fresh_discovery_paths() {
+    fn selected_device_is_revalidated_and_never_replaced_by_the_first_candidate() {
         let mut app = viewer();
         app.automatic = true;
-        discovery_result(&mut app, true, Ok(detected_pair()));
+        app.pending_selection = Some(detected_pair(7));
+        discovery_result(&mut app, Ok(vec![detected_pair(6), detected_pair(7)]));
         app.refresh_discovery();
         assert!(app.camera.is_some() && app.serial.is_some());
-        assert!(app.video_path.ends_with("video6") && app.serial_path.ends_with("ttyUSB4"));
+        assert!(app.video_path.ends_with("video7") && app.serial_path.ends_with("ttyUSB7"));
+        assert!(app.pending_selection.is_none() && app.candidates.is_empty());
         wait_disconnected(&mut app);
+    }
+
+    #[test]
+    fn changed_or_missing_selection_reports_an_error_without_connecting_another_device() {
+        let mut moved = detected_pair(7);
+        moved.hub = PathBuf::from("/sys/devices/another-hub");
+        for pairs in [vec![detected_pair(6)], vec![moved], vec![]] {
+            let mut app = viewer();
+            app.pending_selection = Some(detected_pair(7));
+            discovery_result(&mut app, Ok(pairs));
+            app.refresh_discovery();
+            assert!(app.camera.is_none() && app.serial.is_none());
+            assert!(app.error.is_some() && app.pending_selection.is_none() && app.candidates.is_empty());
+            assert!(app.video_path.is_empty() && app.serial_path.is_empty());
+        }
     }
 
     #[test]
     fn failed_discovery_clears_old_paths_and_keeps_devices_closed() {
         let mut app = viewer();
         assert!(!app.automatic);
-        discovery_result(&mut app, true, Err("Multiple NanoKVM candidates".into()));
+        discovery_result(&mut app, Err("NanoKVM serial device missing".into()));
         app.refresh_discovery();
         assert!(app.video_path.is_empty() && app.serial_path.is_empty());
         assert!(app.camera.is_none() && app.serial.is_none());
-        assert!(app.discovery_status.contains("Multiple"));
+        assert!(app.discovery_status.contains("serial device missing"));
+        assert_eq!(app.error.as_deref(), Some("NanoKVM serial device missing"));
     }
 
     #[test]
     fn disconnect_cancels_a_pending_discovery_connection() {
         let mut app = viewer();
-        discovery_result(&mut app, true, Ok(detected_pair()));
+        app.pending_selection = Some(detected_pair(6));
+        discovery_result(&mut app, Ok(vec![detected_pair(6)]));
         app.disconnect();
         app.refresh_discovery();
-        assert!(app.discovery_rx.is_none() && !app.connect_after_discovery);
+        assert!(app.discovery_rx.is_none() && app.pending_selection.is_none() && app.candidates.is_empty());
         assert!(app.camera.is_none() && app.serial.is_none());
     }
 
@@ -2734,6 +2905,17 @@ mod tests {
             assert!(app.camera.is_some() && app.serial.is_some());
             wait_disconnected(&mut app);
             assert!(app.video_status.contains("open video device") || app.serial_status.contains("Serial open failed"));
+        }
+    }
+
+    #[test]
+    fn incomplete_manual_paths_report_an_error_without_starting_workers() {
+        for opts in [Options { video: "/unavailable/video".into(), serial: String::new() },
+            Options { video: String::new(), serial: "/unavailable/serial".into() }] {
+            let mut app = Viewer::disconnected(opts);
+            app.connect();
+            assert!(app.error.as_deref().unwrap().contains("both --video and --serial"));
+            assert!(app.camera.is_none() && app.serial.is_none() && app.discovery_rx.is_none());
         }
     }
 

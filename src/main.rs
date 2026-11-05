@@ -19,7 +19,7 @@ fn main() -> eframe::Result {
             "--video" => video = args.next().unwrap_or_else(|| video.clone()),
             "--serial" => serial = args.next().unwrap_or_default(),
             "--help" | "-h" => {
-                println!("Usage: nanokvm-rust [--video PATH --serial PATH]\nWithout paths, discover NanoKVM automatically; Connect starts the devices.");
+                println!("Usage: nanokvm-rust [--video PATH --serial PATH]\nAutomatically connect one NanoKVM; choose when multiple devices are found.\nMissing devices show an error. Supplying both paths connects directly.");
                 return Ok(());
             }
             _ => eprintln!("Ignoring unknown argument: {arg}"),
