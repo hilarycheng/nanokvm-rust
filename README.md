@@ -69,7 +69,8 @@ Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件�
 ## 已知限制
 
 - 只有畫面上嘅 Super toggle。實體 Meta／Super capture 同 Wayland shortcut inhibition 未完成。
-- Ctrl+C/V/X, some Shift symbols, and modifier ordering remain unresolved under T-08.
+- Ctrl+C/V/X, Shift punctuation, and modifier ordering have software coverage under T-08. Hardware HID delivery remains unverified.
+- The pinned egui-winit patch preserves keys before clipboard translation. Recheck it before upgrading egui/eframe.
 - Local input isolation has software coverage under T-09. Focus Mode and screenshot selection integration remain pending.
 - Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
 - A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
@@ -91,6 +92,7 @@ cargo test --all-targets
 
 Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05, T-07, and T-09 software checks and limits.
 See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
+See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08 checks and the native input patch.
 
 ## Source 分工
 

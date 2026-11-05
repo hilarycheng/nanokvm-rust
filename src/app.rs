@@ -474,10 +474,26 @@ impl Viewer {
         }
         self.next_mouse_update = now + Duration::from_millis(12);
     }
+
+    fn forward_key(&mut self, event: &egui::Event) {
+        let egui::Event::Key { key, physical_key, pressed, modifiers, .. } = event else { return; };
+        let key = physical_key.unwrap_or(*key);
+        if key == egui::Key::Escape && *pressed {
+            self.release_remote();
+            return;
+        }
+        let before = self.keyboard.bytes();
+        input::sync_modifiers(&mut self.keyboard, *modifiers, self.remote_super);
+        if let Some(usage) = input::map_key(key) {
+            self.keyboard.set_key(usage, *pressed);
+        }
+        if self.keyboard.bytes() != before { self.send_keyboard(); }
+    }
 }
 
 impl eframe::App for Viewer {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        let native = egui_winit::take_keyboard_input(ctx, input.viewport_id);
         if !self.remote { return; }
         let video_id = egui::Id::new("video");
         if !input.focused || input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))) {
@@ -497,23 +513,27 @@ impl eframe::App for Viewer {
             }
             return;
         }
-        // EgUI 0.31 provides Ctrl/Alt/Shift but NOT native Super state on Linux.
-        if input::sync_modifiers(&mut self.keyboard, input.modifiers, self.remote_super) {
-            self.send_keyboard();
-        }
-        for event in &input.events {
-            if !self.remote { break; }
-            if let egui::Event::Key { key, pressed, repeat, .. } = event {
-                if *key == egui::Key::Escape && *pressed {
-                    self.release_remote();
-                    break;
-                }
-                if *repeat && *pressed { continue; }
-                if let Some(usage) = input::map_key(*key) {
-                    self.keyboard.set_key(usage, *pressed);
-                    self.send_keyboard();
+        if native.is_empty() {
+            for event in &input.events {
+                if !self.remote { break; }
+                self.forward_key(event);
+            }
+        } else {
+            for event in native {
+                if !self.remote { break; }
+                match event {
+                    egui_winit::KeyboardInput::Key(event) => self.forward_key(&event),
+                    egui_winit::KeyboardInput::Modifiers(modifiers) => {
+                        if input::sync_modifiers(&mut self.keyboard, modifiers, self.remote_super) {
+                            self.send_keyboard();
+                        }
+                    }
                 }
             }
+        }
+        // The batch snapshot applies after its ordered events, including modifier-only frames.
+        if self.remote && input::sync_modifiers(&mut self.keyboard, input.modifiers, self.remote_super) {
+            self.send_keyboard();
         }
         // Remote keyboard events must not also activate or edit local widgets.
         input.events.retain(|event| !matches!(event,
@@ -596,6 +616,118 @@ mod tests {
 
     fn key(key: egui::Key, pressed: bool) -> egui::Event {
         egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: egui::Modifiers::default() }
+    }
+
+    fn native_keyboard_frame(app: &mut Viewer, ctx: &egui::Context, native: Vec<egui_winit::KeyboardInput>, mut raw: egui::RawInput) {
+        ctx.data_mut(|data| data.insert_temp(
+            egui::Id::new("egui-winit-keyboard-input").with(raw.viewport_id), native,
+        ));
+        app.raw_input_hook(ctx, &mut raw);
+    }
+
+    fn keyboard_reports(reports: &Receiver<Report>) -> Vec<[u8; 8]> {
+        reports.try_iter().map(|report| {
+            let Report::Keyboard(bytes) = report else { panic!("expected keyboard report"); };
+            bytes
+        }).collect()
+    }
+
+    #[test]
+    fn physical_keys_survive_shift_symbols_layout_changes_and_repeats() {
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        for (logical, physical, usage) in [
+            (egui::Key::Plus, egui::Key::Equals, 0x2e),
+            (egui::Key::Questionmark, egui::Key::Slash, 0x38),
+            (egui::Key::Colon, egui::Key::Semicolon, 0x33),
+            (egui::Key::Exclamationmark, egui::Key::Num1, 0x1e),
+            (egui::Key::OpenCurlyBracket, egui::Key::OpenBracket, 0x2f),
+            (egui::Key::CloseCurlyBracket, egui::Key::CloseBracket, 0x30),
+            (egui::Key::Pipe, egui::Key::Backslash, 0x31),
+            (egui::Key::Z, egui::Key::Y, 0x1c),
+        ] {
+            let down = egui::Event::Key { key: logical, physical_key: Some(physical),
+                pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+            let repeat = egui::Event::Key { key: logical, physical_key: Some(physical),
+                pressed: true, repeat: true, modifiers: egui::Modifiers::SHIFT };
+            let up = key(physical, false);
+            let mut raw = egui::RawInput { events: vec![down, repeat, up], ..Default::default() };
+            app.raw_input_hook(&ctx, &mut raw);
+            let sent = keyboard_reports(&reports);
+            assert_eq!(sent, vec![[2, 0, usage, 0, 0, 0, 0, 0], [0; 8]]);
+            assert!(raw.events.is_empty());
+        }
+        let mut raw = egui::RawInput { events: vec![egui::Event::Key {
+            key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }, key(egui::Key::A, false)], ..Default::default() };
+        app.raw_input_hook(&ctx, &mut raw);
+        assert_eq!(keyboard_reports(&reports), vec![[0, 0, 4, 0, 0, 0, 0, 0], [0; 8]]);
+    }
+
+    #[test]
+    fn key_modifiers_precede_the_final_batch_snapshot() {
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        let mut raw = egui::RawInput { events: vec![
+            egui::Event::Key { key: egui::Key::A, physical_key: Some(egui::Key::A),
+                pressed: true, repeat: false, modifiers: egui::Modifiers::CTRL },
+            egui::Event::Key { key: egui::Key::A, physical_key: Some(egui::Key::A),
+                pressed: false, repeat: false, modifiers: egui::Modifiers::CTRL },
+            egui::Event::Key { key: egui::Key::B, physical_key: Some(egui::Key::B),
+                pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT },
+        ], ..Default::default() };
+        app.raw_input_hook(&ctx, &mut raw);
+        assert_eq!(keyboard_reports(&reports), vec![
+            [1, 0, 4, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0],
+            [2, 0, 5, 0, 0, 0, 0, 0], [0, 0, 5, 0, 0, 0, 0, 0],
+        ]);
+    }
+
+    #[test]
+    fn native_clipboard_shortcuts_and_modifier_only_changes_keep_order() {
+        use egui_winit::KeyboardInput::{Key, Modifiers};
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        for (keycode, usage, translated) in [
+            (egui::Key::C, 6, vec![egui::Event::Copy]),
+            (egui::Key::X, 27, vec![egui::Event::Cut]),
+            (egui::Key::V, 25, vec![]),
+            (egui::Key::V, 25, vec![egui::Event::Paste("local clipboard".into())]),
+        ] {
+            native_keyboard_frame(&mut app, &ctx, vec![
+                Modifiers(egui::Modifiers::CTRL),
+                Key(egui::Event::Key { key: keycode, physical_key: Some(keycode),
+                    pressed: true, repeat: false, modifiers: egui::Modifiers::CTRL }),
+                Modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+                Modifiers(egui::Modifiers::CTRL),
+                Key(egui::Event::Key { key: keycode, physical_key: Some(keycode),
+                    pressed: false, repeat: false, modifiers: egui::Modifiers::CTRL }),
+                Modifiers(egui::Modifiers::default()),
+            ], egui::RawInput { events: translated, ..Default::default() });
+            assert_eq!(keyboard_reports(&reports), vec![
+                [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, usage, 0, 0, 0, 0, 0],
+                [3, 0, usage, 0, 0, 0, 0, 0], [1, 0, usage, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0, 0], [0; 8],
+            ]);
+        }
+    }
+
+    #[test]
+    fn native_input_is_drained_when_local_or_released() {
+        for remote in [false, true] {
+            let (mut app, ctx, reports) = input_viewer();
+            app.remote = remote;
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("local_text")));
+            native_keyboard_frame(&mut app, &ctx, vec![egui_winit::KeyboardInput::Key(key(egui::Key::A, true))],
+                egui::RawInput::default());
+            assert!(egui_winit::take_keyboard_input(&ctx, egui::ViewportId::ROOT).is_empty());
+            assert!(reports.is_empty());
+            app.remote = true;
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            app.raw_input_hook(&ctx, &mut egui::RawInput::default());
+            assert!(reports.is_empty());
+        }
     }
 
     #[test]

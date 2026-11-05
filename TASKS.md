@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 8.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 9.
 
-**18 tasks: 7 delivered, 11 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision delivers T-09 local and remote input isolation. T-07 stays open for Focus Mode inhibition integration under T-15.
+This revision delivers T-08 physical-key forwarding, clipboard shortcuts, and ordered modifiers. T-07 stays open for Focus Mode inhibition integration under T-15.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -22,6 +22,7 @@ Revision 4 adds host USB/V4L2 enumeration evidence under T-04; it does not verif
 Revision 5 adds connection lifecycle software checks; revision 6 adds automatic discovery and pairing software checks.
 Revision 7 verifies unexpected cleanup, idle tty hangup, and manual serial recovery with software checks.
 Revision 8 verifies video keyboard ownership, local controls, pointer release, and focus loss through egui regression checks.
+Revision 9 preserves keyboard input before clipboard translation and verifies physical keys and modifier ordering.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -119,12 +120,16 @@ T-14 reconciles the remaining documentation after implementation.
 
 ## Keyboard, mouse, and modes
 
-- [ ] **T-08 — Correct keyboard forwarding**
+- [x] **T-08 — Correct keyboard forwarding**
   - Basis: DESIGN.md remote input; F3–F5. Depends on T-05.
   - Touchpoints: `raw_input_hook`, `map_key`, `sync_modifiers`, `KeyboardReport`, and the native event path where required.
   - Work: preserve physical keys and event-specific modifier order. Handle Ctrl+C/V/X despite local clipboard event translation.
   - Done: shortcuts, Shift punctuation, presses, and releases reach the target correctly, including with an empty local clipboard.
   - Evidence: focused regression checks cover clipboard shortcuts, physical mapping, and multiple modifier changes within one event batch.
+  - Approval (2026-11-05): the user approved T-08 after requesting the T-09 commit.
+  - Result: [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) records 43 app tests and two backend tests. Native key presses survive Ctrl+C/X/V translation, including an empty clipboard. Physical keys and event-specific modifiers determine HID reports.
+  - Result: a pinned local egui-winit 0.31.1 patch preserves native keyboard order without changing local clipboard commands. Repeated presses do not duplicate unchanged reports; local or released input cannot replay later.
+  - Limit: software checks verify queued reports, not hardware HID delivery. Existing egui key coverage and aggregate modifiers remain; T-15 owns side-specific release and Sway inhibition.
 
 - [x] **T-09 — Isolate local controls and remote pointer input**
   - Basis: DESIGN.md keyboard/mouse control and Non-Focus Mode; F6/F7. Depends on T-05 and T-08.
@@ -238,12 +243,12 @@ T-14 reconciles the remaining documentation after implementation.
 | Initial artifacts | T-01, T-02 | 2 | 0 |
 | Build and device evidence | T-03, T-04 | 2 | 0 |
 | Connection and cleanup | T-05, T-06, T-07 | 2 | 1 |
-| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 1 | 3 |
+| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 2 | 2 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 7 | 11 |
+| Total | T-01–T-18 | 8 | 10 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.
