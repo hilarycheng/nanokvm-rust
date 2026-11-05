@@ -2,7 +2,8 @@
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use jpeg_decoder::{Decoder, PixelFormat};
-use std::{io::Cursor, sync::Arc, thread};
+use std::{io::Cursor, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+use crate::worker::Worker;
 use v4l::{buffer::Type, io::traits::CaptureStream, prelude::MmapStream, video::Capture, Device, FourCC};
 
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub struct RgbaFrame {
 pub struct CameraHandle {
     pub frames: Receiver<Arc<RgbaFrame>>,
     pub status: Receiver<String>,
+    pub worker: Worker,
 }
 
 fn decode_mjpeg(data: &[u8]) -> Result<RgbaFrame> {
@@ -43,7 +45,8 @@ fn decode_mjpeg(data: &[u8]) -> Result<RgbaFrame> {
     Ok(RgbaFrame { width, height, rgba })
 }
 
-fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sender<String>) -> Result<()> {
+fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sender<String>, stop: &AtomicBool) -> Result<()> {
+    if stop.load(Ordering::Acquire) { return Ok(()); }
     let dev = Device::with_path(&device_path).context("open video device")?;
     let mut fmt = dev.format().context("query capture format")?;
     fmt.width = 1920;
@@ -56,8 +59,12 @@ fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sen
     let _ = status.try_send(format!("Video: {}×{} MJPG", actual.width, actual.height));
 
     let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 4).context("start capture")?;
-    loop {
-        let (buf, _) = stream.next().context("read MJPG video frame")?;
+    stream.set_timeout(Duration::from_millis(500));
+    while !stop.load(Ordering::Acquire) {
+        // A timeout exits this stream; retrying next() would requeue an undequeued buffer.
+        let next = stream.next();
+        if stop.load(Ordering::Acquire) { break; }
+        let (buf, _) = next.context("read MJPG video frame")?;
         // Fast reject when UI is not consuming; next decoder loop still uses latest frame.
         if frames.is_full() { continue; }
         match decode_mjpeg(buf) {
@@ -70,15 +77,14 @@ fn capture_loop(device_path: String, frames: Sender<Arc<RgbaFrame>>, status: Sen
             }
         }
     }
+    Ok(())
 }
 
 pub fn spawn(device: String) -> CameraHandle {
     let (frame_tx, frames) = bounded(2);
     let (status_tx, status) = bounded(8);
-    thread::spawn(move || {
-        if let Err(err) = capture_loop(device, frame_tx, status_tx.clone()) {
-            let _ = status_tx.try_send(format!("Video stopped: {err:#}"));
-        }
+    let worker = Worker::spawn(move |stop| {
+        capture_loop(device, frame_tx, status_tx, &stop).map_err(|err| format!("Video stopped: {err:#}"))
     });
-    CameraHandle { frames, status }
+    CameraHandle { frames, status, worker }
 }

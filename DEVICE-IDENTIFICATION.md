@@ -90,7 +90,7 @@ These are constraints for T-06 implementation, not current application behavior:
 Only the current single-candidate topology was observed.
 Absent and multiple-device behavior needs software tests under T-06; no such behavior is claimed as tested here.
 
-## Current code handling
+## Code handling at the T-04 snapshot
 
 - `src/main.rs` still defaults to `/dev/video0` and accepts a manual serial path. Automatic pairing is absent.
 - `src/capture.rs` propagates open, format, and frame-read errors out of its worker and reports a stopped status.
@@ -98,7 +98,8 @@ Absent and multiple-device behavior needs software tests under T-06; no such beh
 - `src/app.rs::refresh_messages` updates status text; it does not coordinate cleanup of both workers.
 - `connect_serial` restarts only serial. Video recovery and complete input/resource cleanup remain T-05/T-07 work.
 
-The existing partial handling does not meet DESIGN.md's coordinated disconnect requirements.
+This historical partial handling did not meet DESIGN.md's coordinated disconnect requirements.
+T-05 changes and software evidence are recorded in [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md).
 Removing physical replug acceptance does not waive these code requirements.
 
 ## Read-only commands and environment

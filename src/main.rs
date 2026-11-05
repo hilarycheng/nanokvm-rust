@@ -4,6 +4,7 @@ mod gpu;
 mod input;
 mod protocol;
 mod serial;
+mod worker;
 
 fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);

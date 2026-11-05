@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
-use egui_wgpu::{self, wgpu};
+use crate::worker::SHUTDOWN_TIMEOUT;
 
 use crate::{capture::{self, CameraHandle, RgbaFrame}, gpu::{ColorSettings, GpuVideo, VideoCallback}, input, protocol::{self, KeyboardReport}, serial::{self, SerialHandle, Report}};
 
@@ -10,7 +10,9 @@ pub struct Options {
 }
 
 pub struct Viewer {
-    camera: CameraHandle,
+    camera: Option<CameraHandle>,
+    video_path: String,
+    disconnecting: Option<Instant>,
     serial: Option<SerialHandle>,
     serial_path: String,
     serial_ready: bool,
@@ -50,17 +52,24 @@ impl Viewer {
             let renderer = GpuVideo::new(&rs.device, rs.target_format);
             rs.renderer.write().callback_resources.insert(renderer);
         }
-        let camera = capture::spawn(opts.video);
-        let mut app = Self {
-            camera,
+        let mut app = Self::disconnected(opts);
+        app.colors = colors;
+        app
+    }
+
+    fn disconnected(opts: Options) -> Self {
+        Self {
+            camera: None,
+            video_path: opts.video,
+            disconnecting: None,
             serial: None,
             serial_path: opts.serial,
             serial_ready: false,
-            video_status: "Connecting to V4L2…".to_owned(),
-            serial_status: "Not connected".to_owned(),
+            video_status: "Disconnected".to_owned(),
+            serial_status: "Disconnected".to_owned(),
             image: None,
             new_frame: None,
-            colors,
+            colors: ColorSettings::default(),
             colors_open: false,
             remote: false,
             remote_super: false,
@@ -73,27 +82,71 @@ impl Viewer {
             fps: 0.0,
             fps_clock: Instant::now(),
             fps_frames: 0,
-        };
-        if !app.serial_path.is_empty() {
-            app.connect_serial();
         }
-        app
     }
 
-    fn connect_serial(&mut self) {
-        self.release_remote();
-        if let Some(old) = self.serial.take() {
-            let _ = old.tx.try_send(Report::Shutdown);
+    fn connect(&mut self) {
+        if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() { return; }
+        if self.video_path.trim().is_empty() || self.serial_path.trim().is_empty() {
+            self.video_status = "Set both Video and Serial paths before connecting".into();
+            return;
         }
-        if self.serial_path.trim().is_empty() { return; }
+        self.camera = Some(capture::spawn(self.video_path.trim().to_owned()));
         self.serial = Some(serial::spawn(self.serial_path.trim().to_owned()));
+        self.video_status = "Connecting to V4L2…".into();
+        self.serial_status = "Connecting…".into();
         self.serial_ready = false;
-        self.serial_status = "Connecting…".to_owned();
+    }
+
+    fn clear_input(&mut self) {
+        self.remote = false;
+        self.remote_super = false;
+        self.keyboard.release();
+        self.buttons = 0;
+        self.last_mouse = (0.5, 0.5);
+        self.next_mouse_update = Instant::now();
+    }
+
+    fn disconnect(&mut self) {
+        self.clear_input();
+        self.serial_ready = false;
+        self.image = None;
+        self.new_frame = None;
+        self.frames_seen = 0;
+        self.fps = 0.0;
+        self.fps_frames = 0;
+        self.fps_clock = Instant::now();
+        if self.disconnecting.is_some() { return; }
+        if self.camera.is_none() && self.serial.is_none() { return; }
+        self.disconnecting = Some(Instant::now());
+        self.video_status = "Disconnecting…".into();
+        self.serial_status = "Disconnecting…".into();
+        if let Some(camera) = &self.camera { camera.worker.stop(); }
+        if let Some(serial) = &self.serial { serial.worker.stop(); }
+    }
+
+    fn poll_disconnect(&mut self) {
+        let Some(started) = self.disconnecting else { return; };
+        if let Some(result) = self.camera.as_mut().and_then(|camera| camera.worker.finish()) {
+            self.video_status = result.err().unwrap_or_else(|| "Disconnected".into());
+            self.camera = None;
+        }
+        if let Some(result) = self.serial.as_mut().and_then(|serial| serial.worker.finish()) {
+            self.serial_status = result.err().unwrap_or_else(|| "Disconnected".into());
+            self.serial = None;
+        }
+        if self.camera.is_none() && self.serial.is_none() {
+            self.disconnecting = None;
+        } else if started.elapsed() >= SHUTDOWN_TIMEOUT {
+            if self.camera.is_some() { self.video_status = "Video still stopping; reconnect unavailable".into(); }
+            if self.serial.is_some() { self.serial_status = "Serial still stopping; reconnect unavailable".into(); }
+        }
     }
 
     fn send(&mut self, report: Report) {
-        if let Some(port) = self.serial.as_ref() {
-            if port.tx.try_send(report).is_err() {
+        if self.disconnecting.is_some() { return; }
+        if let Some(port) = self.serial.as_mut() {
+            if port.send(report).is_err() {
                 self.serial_status = "USB Serial TX queue full or closed".to_owned();
                 self.serial_ready = false;
                 self.release_remote();
@@ -112,33 +165,40 @@ impl Viewer {
     }
 
     fn release_remote(&mut self) {
-        self.remote = false;
-        self.remote_super = false;
-        self.keyboard.release();
-        self.buttons = 0;
-        // Always transmit releases even if the app/window lost focus.
-        if let Some(port) = self.serial.as_ref() {
-            let _ = port.tx.try_send(Report::Keyboard([0; 8]));
-            let _ = port.tx.try_send(Report::AbsoluteMouse(protocol::mouse_absolute(0, self.last_mouse.0, self.last_mouse.1, 0)));
+        let mouse = protocol::mouse_absolute(0, self.last_mouse.0, self.last_mouse.1, 0);
+        self.clear_input();
+        if self.disconnecting.is_none() {
+            if let Some(port) = self.serial.as_mut() {
+                if port.release(mouse).is_err() {
+                    self.serial_status = "Could not queue HID release: serial worker closed".into();
+                }
+            }
         }
     }
 
     fn refresh_messages(&mut self) {
-        while let Ok(msg) = self.camera.status.try_recv() {
-            self.video_status = msg;
+        if self.disconnecting.is_some() { self.poll_disconnect(); return; }
+        if let Some(camera) = &self.camera {
+            while let Ok(msg) = camera.status.try_recv() { self.video_status = msg; }
+            while let Ok(img) = camera.frames.try_recv() {
+                self.image = Some(img.clone());
+                self.new_frame = Some(img);
+                self.frames_seen += 1;
+                self.fps_frames += 1;
+            }
         }
-        if let Some(serial) = self.serial.as_ref() {
+        if let Some(serial) = &self.serial {
             while let Ok(msg) = serial.status_rx.try_recv() {
                 self.serial_ready = msg.starts_with("Serial connected:");
                 self.serial_status = msg;
             }
         }
-        // Drop stale frames: use most recent frame only. This limits latency.
-        while let Ok(img) = self.camera.frames.try_recv() {
-            self.image = Some(img.clone());
-            self.new_frame = Some(img);
-            self.frames_seen += 1;
-            self.fps_frames += 1;
+        // A failed partial connection must close the other worker before retrying.
+        if self.camera.as_ref().is_some_and(|c| c.worker.is_finished()) ||
+            self.serial.as_ref().is_some_and(|s| s.worker.is_finished()) {
+            self.disconnect();
+            self.poll_disconnect();
+            return;
         }
         let elapsed = self.fps_clock.elapsed();
         if elapsed >= Duration::from_millis(1000) {
@@ -199,12 +259,19 @@ impl Viewer {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.strong("NanoKVM Rust");
+                    let active = self.camera.is_some() || self.serial.is_some();
+                    if ui.add_enabled(!active && self.disconnecting.is_none(), egui::Button::new("Connect")).clicked() {
+                        self.connect();
+                    }
+                    if ui.add_enabled(active && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
+                        self.disconnect();
+                    }
                     ui.separator();
                     if self.remote {
                         if ui.button("■ Release input (Esc)").clicked() {
                             self.release_remote();
                         }
-                    } else if ui.add_enabled(self.serial_ready, egui::Button::new("▶ Capture input")).clicked() {
+                    } else if ui.add_enabled(self.serial_ready && self.image.is_some(), egui::Button::new("▶ Capture input")).clicked() {
                         self.remote = true;
                     }
                     if ui.add_enabled(self.remote, egui::Button::new(
@@ -237,15 +304,22 @@ impl Viewer {
                     ui.separator();
                     ui.small(&self.serial_status);
                     ui.separator();
-                    ui.label("Serial:");
-                    ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.serial_path));
-                    if ui.button("Connect").clicked() { self.connect_serial(); }
+                    ui.add_enabled_ui(self.camera.is_none() && self.serial.is_none(), |ui| {
+                        ui.label("Video:");
+                        ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.video_path));
+                        ui.label("Serial:");
+                        ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.serial_path));
+                    });
                 });
             });
     }
 
     fn render_video(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.image.is_none() {
+                ui.centered_and_justified(|ui| { ui.label("No video frame — connect devices to start"); });
+                return;
+            }
             let outer = ui.available_rect_before_wrap();
             let (width, height) = self.image.as_ref()
                 .map(|f| (f.width, f.height)).unwrap_or((1920, 1080));
@@ -348,9 +422,151 @@ impl eframe::App for Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        self.release_remote();
-        if let Some(handle) = self.serial.take() {
-            let _ = handle.tx.try_send(Report::Shutdown);
+        self.disconnect();
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        if let Some(camera) = &mut self.camera {
+            if let Err(err) = camera.worker.wait_until(deadline) { eprintln!("{err}"); }
         }
+        if let Some(serial) = &mut self.serial {
+            if let Err(err) = serial.worker.wait_until(deadline) { eprintln!("{err}"); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worker::Worker;
+    use crossbeam_channel::{bounded, Receiver, Sender};
+    use std::{io::{self, Write}, sync::{Mutex, atomic::Ordering}, thread};
+
+    fn viewer() -> Viewer {
+        Viewer::disconnected(Options {
+            video: "/nonexistent-nanokvm-t05/video".into(),
+            serial: "/nonexistent-nanokvm-t05/serial".into(),
+        })
+    }
+
+    struct Port {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        _resource: Sender<()>,
+    }
+    impl Write for Port {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    fn camera(fail: bool) -> (CameraHandle, Receiver<()>) {
+        let (frame_tx, frames) = bounded(2);
+        let (status_tx, status) = bounded(8);
+        let (resource, closed) = bounded(1);
+        let worker = Worker::spawn(move |stop| {
+            let _resources = (resource, frame_tx, status_tx);
+            if fail { return Err("Mock video open failed".into()); }
+            while !stop.load(Ordering::Acquire) { thread::yield_now(); }
+            Ok(())
+        });
+        (CameraHandle { frames, status, worker }, closed)
+    }
+
+    fn serial() -> (SerialHandle, Receiver<()>, Arc<Mutex<Vec<u8>>>) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (resource, closed) = bounded(1);
+        let port = Port { bytes: bytes.clone(), _resource: resource };
+        (serial::tests::spawn_port(port), closed, bytes)
+    }
+
+    fn wait_disconnected(app: &mut Viewer) {
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while app.camera.is_some() || app.serial.is_some() {
+            app.refresh_messages();
+            assert!(Instant::now() < deadline, "workers did not close");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.disconnecting.is_none());
+    }
+
+    fn assert_neutral(bytes: &[u8]) {
+        let mut expected = protocol::encode(protocol::SEND_KEYBOARD, &[0; 8]).unwrap();
+        expected.extend(protocol::encode(protocol::SEND_MOUSE_ABSOLUTE, &protocol::mouse_absolute(0, 0.5, 0.5, 0)).unwrap());
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn starts_disconnected_and_failed_connections_can_retry() {
+        let mut app = viewer();
+        assert!(app.camera.is_none() && app.serial.is_none());
+        app.disconnect();
+        for _ in 0..2 {
+            app.connect();
+            assert!(app.camera.is_some() && app.serial.is_some());
+            wait_disconnected(&mut app);
+            assert!(app.video_status.contains("open video device") || app.serial_status.contains("Serial open failed"));
+        }
+    }
+
+    #[test]
+    fn disconnect_clears_state_joins_resources_and_blocks_early_reconnect() {
+        let mut app = viewer();
+        let (camera, video_closed) = camera(false);
+        let (serial, serial_closed, bytes) = serial();
+        app.camera = Some(camera);
+        app.serial = Some(serial);
+        app.remote = true;
+        app.remote_super = true;
+        app.serial_ready = true;
+        app.keyboard.set_key(4, true);
+        app.keyboard.modifiers = 8;
+        app.buttons = 7;
+        app.image = Some(Arc::new(RgbaFrame { width: 1, height: 1, rgba: vec![0; 4] }));
+        app.new_frame = app.image.clone();
+        app.disconnect();
+        app.disconnect();
+        app.connect();
+        assert!(app.disconnecting.is_some());
+        assert!(!app.remote && !app.remote_super && !app.serial_ready);
+        assert_eq!(app.keyboard.bytes(), [0; 8]);
+        assert_eq!(app.buttons, 0);
+        assert!(app.image.is_none() && app.new_frame.is_none());
+        wait_disconnected(&mut app);
+        assert!(video_closed.recv().is_err());
+        assert!(serial_closed.recv().is_err());
+        assert_neutral(&bytes.lock().unwrap());
+        app.connect();
+        assert!(app.camera.is_some() && app.serial.is_some());
+        wait_disconnected(&mut app);
+    }
+
+    #[test]
+    fn either_partial_open_failure_closes_the_other_worker() {
+        for video_fails in [true, false] {
+            let mut app = viewer();
+            let (camera, video_closed) = camera(video_fails);
+            let (working_serial, serial_closed, _) = serial();
+            app.camera = Some(camera);
+            app.serial = Some(if video_fails { working_serial } else {
+                drop(working_serial);
+                serial::spawn(app.serial_path.clone())
+            });
+            wait_disconnected(&mut app);
+            assert!(video_closed.recv().is_err());
+            assert_eq!(serial_closed.recv_timeout(SHUTDOWN_TIMEOUT), Err(crossbeam_channel::RecvTimeoutError::Disconnected));
+        }
+    }
+
+    #[test]
+    fn app_drop_waits_for_both_resources_and_neutral_reports() {
+        let mut app = viewer();
+        let (camera, video_closed) = camera(false);
+        let (serial, serial_closed, bytes) = serial();
+        app.camera = Some(camera);
+        app.serial = Some(serial);
+        drop(app);
+        assert_eq!(video_closed.try_recv(), Err(crossbeam_channel::TryRecvError::Disconnected));
+        assert_eq!(serial_closed.try_recv(), Err(crossbeam_channel::TryRecvError::Disconnected));
+        assert_neutral(&bytes.lock().unwrap());
     }
 }

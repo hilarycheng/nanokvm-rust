@@ -25,17 +25,20 @@
 
 需要 Rust toolchain、eframe／wgpu 及 V4L2 所需系統 libraries，以及 video／serial device 存取權限。
 
-**以下係現有行為，尚未符合新 scope：啟動 App 會即時嘗試開啟 video。傳入 `--serial` 亦會自動連接 serial。**
+The app starts disconnected, including when CLI device paths are supplied. Select Connect to open video and serial.
 
 ```sh
 cargo run --release -- --video /dev/video0 --serial /dev/ttyACM0
 ```
 
-目前仍須自行提供正確 device paths。GUI 底部嘅 Serial 欄位及 Connect 只處理 serial，唔會重新啟動停止咗嘅 video thread。
+Set both Video and Serial paths in the status bar. Connect starts both workers; automatic device discovery remains pending.
+Disconnect clears local input and video, stops both workers, and attempts neutral HID reports before serial closes.
+Connect becomes available after both workers finish. App exit uses the same shutdown path.
 
-連接 serial 後，按 Capture input 或雙擊影像啟用遠端輸入。按 Esc 或 Release input 退出控制。Esc 目前唔會送到 target。
+Once serial is ready and a video frame is available, use Capture input or double-click the image.
+Escape or Release input ends remote input capture. Escape forwarding remains pending.
 
-**Release input 只停止輸入轉發，唔等於 Disconnect。** 目前沒有完整 video＋serial Disconnect 操作。
+Release input clears queued input and requests neutral reports while devices remain connected. Disconnect closes both device workers.
 
 ## 調色設定
 
@@ -50,7 +53,8 @@ Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件�
 
 - 只有畫面上嘅 Super toggle。實體 Meta／Super capture 同 Wayland shortcut inhibition 未完成。
 - Ctrl+C／V／X、部分 Shift 符號、modifier 時序及本機／遠端輸入隔離有已重現問題。
-- Queue 滿載或 App 退出時，遠端按鍵釋放未有可靠保證。
+- Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
+- A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
 - 尚未自動識別及配對 USB serial／V4L2 devices。
 - 尚未提供 Screenshot。
 - 尚未量度原版同 Rust viewer 嘅 RAM 差距。
@@ -67,7 +71,7 @@ cargo test --all-targets
 
 另外 6 個臨時測試成功重現已知問題，並未加入此 repo。WGSL 通過 Naga 24.0.0 靜態驗證。GPU 實際 render 因環境沒有可用 Vulkan adapter 而未能執行。NanoKVM、Sway 實機測試及 RAM 比較仍未執行。
 
-本 repo 尚未包含 `Cargo.lock`。以上結果對應當次 dependency resolution，唔代表日後解析出嘅所有版本組合都已驗證。
+Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05 software checks and shutdown limits.
 
 ## Source 分工
 
