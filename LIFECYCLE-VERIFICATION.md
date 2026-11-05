@@ -110,3 +110,48 @@ The reusable GPU renderer remains allocated while the window exists; cleanup clo
 
 Physical unplugging remains waived. Real capture, GPU rendering, and hardware HID delivery were **NOT RUN**.
 Focus Mode inhibition does not exist yet. T-07 remains unchecked until T-15 implements and verifies its release on this cleanup path.
+
+## T-09 input ownership and focus release
+
+Date: 2026-11-05 (Asia/Hong_Kong).
+
+### Behavior
+
+- A fresh video press or Capture input enables forwarding and gives keyboard focus to the video widget.
+- Keyboard forwarding requires video focus. A local pointer press surrenders that focus before the batch reaches local widgets.
+- Local widget focus releases held keyboard and mouse reports at the last remote pointer position.
+  The on-screen Super toggle retains its selected state during local interaction, but its HID modifier is released.
+  Returning keyboard focus to video reapplies that toggle. Release input, window focus loss, and disconnect clear it completely.
+- Forwarded batches remove Key, Text, clipboard, and IME events from egui input and clear local modifiers.
+  Local text input remains available when a local widget owns focus. T-08 still owns clipboard-to-HID and key-mapping fixes.
+- Pointer presses require an unobscured video hit. Unowned releases are ignored; a video-owned release outside the image uses the last remote position.
+- Local widget drags do not become remote drags when they cross the video. Wheel routing follows pointer-event order.
+- Throttled movement retains its final pointer location and sends it on a later frame, even without another pointer event.
+- Window focus loss clears input before keyboard forwarding. Releasing capture during a drag requires a fresh video press to capture again.
+
+### Software evidence
+
+The same locked offline test command above passes **39 tests**, including eight new egui regression checks:
+
+| Check | Evidence |
+| --- | --- |
+| Local and remote keyboard ownership | A real egui TextEdit receives local text while no HID report is queued. With video focus, a key report is queued and text, clipboard, and IME events do not edit the local field. Escape release does not leak the remaining text batch. |
+| Local clicks and held input | Outside-image press/release queues no pointer movement. With held input, it queues a paired neutral release at the last remote coordinates. Super remains selected without repeated release reports. |
+| Video press and outside release | A single press enables forwarding and takes video focus. An outside release clears only the owned button and preserves the last remote position. |
+| Local drag across video | Dragging a local TextEdit selection across video queues no remote input. |
+| Explicit release during drag | Escape ends capture while a button remains physically held. Subsequent motion and release cannot recapture input. |
+| Wheel event ordering | A local wheel event followed by movement into video is not forwarded. A video wheel event followed by movement outside is forwarded. |
+| Window focus loss | A batch containing a key and focus loss queues only neutral release, clearing keys, buttons, capture, and Super. |
+| Final throttled motion | After throttling expires, a frame without pointer events sends the last pending position. |
+
+Tests run the production input hook and video interaction through `egui::Context::run` with a local TextEdit fixture.
+A deterministic serial queue records reports; no device or GPU render pass is needed.
+No dependency, configuration, or key-mapping change was required.
+The offline release build passes with existing unused-code warnings. The root executable matches the release output and remains executable.
+
+### Limits and later integration
+
+These checks verify routing and queued releases, not hardware delivery. Sway, GPU rendering, and NanoKVM input were **NOT RUN**.
+The T-08 physical-key, clipboard shortcut, and modifier-order defects remain open.
+T-15 owns explicit Focus Mode, Non-Focus Mode, shortcut inhibition, and replacing Escape release.
+T-18 owns screenshot selection and must suspend forwarding while its overlay is active.

@@ -34,6 +34,7 @@ pub struct Viewer {
     keyboard: KeyboardReport,
     buttons: u8,
     last_mouse: (f32, f32),
+    pointer_pos: Option<egui::Pos2>,
     next_mouse_update: Instant,
     frames_seen: u64,
     fps: f32,
@@ -88,6 +89,7 @@ impl Viewer {
             keyboard: KeyboardReport::default(),
             buttons: 0,
             last_mouse: (0.5, 0.5),
+            pointer_pos: None,
             next_mouse_update: Instant::now(),
             frames_seen: 0,
             fps: 0.0,
@@ -154,6 +156,7 @@ impl Viewer {
         self.keyboard.release();
         self.buttons = 0;
         self.last_mouse = (0.5, 0.5);
+        self.pointer_pos = None;
         self.next_mouse_update = Instant::now();
     }
 
@@ -218,8 +221,14 @@ impl Viewer {
     }
 
     fn release_remote(&mut self) {
-        let mouse = protocol::mouse_absolute(0, self.last_mouse.0, self.last_mouse.1, 0);
+        self.release_held_input();
         self.clear_input();
+    }
+
+    fn release_held_input(&mut self) {
+        let mouse = protocol::mouse_absolute(0, self.last_mouse.0, self.last_mouse.1, 0);
+        self.keyboard.release();
+        self.buttons = 0;
         if self.disconnecting.is_none() {
             if let Some(port) = self.serial.as_mut() {
                 if port.release(mouse).is_err() {
@@ -327,6 +336,7 @@ impl Viewer {
                         }
                     } else if ui.add_enabled(self.serial_ready && self.image.is_some(), egui::Button::new("▶ Capture input")).clicked() {
                         self.remote = true;
+                        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
                     }
                     if ui.add_enabled(self.remote, egui::Button::new(
                         if self.remote_super { "Super: ON" } else { "Super: OFF" }
@@ -338,6 +348,7 @@ impl Viewer {
                             self.keyboard.modifiers & !protocol::modifiers::LEFT_SUPER
                         };
                         self.send_keyboard();
+                        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
                     }
                     if ui.button("Color").clicked() {
                         self.release_remote();
@@ -394,36 +405,30 @@ impl Viewer {
                     settings: self.colors,
                 },
             ));
-            let response = ui.interact(rect, ui.id().with("video"), egui::Sense::click_and_drag());
-            if !self.remote && response.double_clicked() && self.serial_ready {
+            let response = ui.interact(rect, egui::Id::new("video"), egui::Sense::click_and_drag());
+            let pressed = ctx.input(|i| i.events.iter().any(|event|
+                matches!(event, egui::Event::PointerButton { pressed: true, pos, .. } if rect.contains(*pos))));
+            if self.serial_ready && ctx.input(|i| i.focused) && pressed && (response.clicked() || response.is_pointer_button_down_on()) {
                 self.remote = true;
+                response.request_focus();
             }
-            if self.remote {
-                self.handle_mouse(ctx, rect);
+            if self.remote && ctx.input(|i| i.focused) {
+                self.handle_mouse(ctx, &response);
             }
         });
     }
 
-    fn handle_mouse(&mut self, ctx: &egui::Context, video_rect: egui::Rect) {
+    fn handle_mouse(&mut self, ctx: &egui::Context, video: &egui::Response) {
+        let video_rect = video.rect;
         let now = Instant::now();
-        let (pos, scroll, events) = ctx.input(|i| (
-            i.pointer.hover_pos(),
-            i.raw_scroll_delta.y,
-            i.events.clone(),
-        ));
-        if let Some(pos) = pos {
-            if video_rect.contains(pos) && now >= self.next_mouse_update {
-                let point = input::normalized_point(video_rect, pos);
-                if (self.last_mouse.0 - point.0).abs() > 0.0002 ||
-                   (self.last_mouse.1 - point.1).abs() > 0.0002 {
-                    self.last_mouse = point;
-                    self.send_pointer(0);
-                }
-                self.next_mouse_update = now + Duration::from_millis(12);
-            }
-        }
+        let events = ctx.input(|i| i.events.clone());
+        let over_video = |pos| video_rect.contains(pos) && ctx.layer_id_at(pos) == Some(video.layer_id);
+        let local_drag = ctx.dragged_id().or(ctx.drag_stopped_id()).is_some_and(|id| id != video.id);
+        let mut pointer_pos = self.pointer_pos;
         for event in events {
+            if !self.remote { break; }
             if let egui::Event::PointerButton { pos, button, pressed, .. } = event {
+                pointer_pos = Some(pos);
                 let bit = match button {
                     egui::PointerButton::Primary => 1,
                     egui::PointerButton::Secondary => 2,
@@ -431,30 +436,73 @@ impl Viewer {
                     egui::PointerButton::Extra1 => 8,
                     egui::PointerButton::Extra2 => 16,
                 };
-                // Release any held button even if mouse went outside video.
-                if pressed && !video_rect.contains(pos) { continue; }
+                // Only video-owned presses can produce remote releases.
+                if pressed && (!over_video(pos) || local_drag) { continue; }
+                if !pressed && self.buttons & bit == 0 { continue; }
                 if pressed { self.buttons |= bit; }
                 else { self.buttons &= !bit; }
-                self.last_mouse = input::normalized_point(video_rect, pos);
+                if over_video(pos) { self.last_mouse = input::normalized_point(video_rect, pos); }
                 self.send_pointer(0);
+            } else if let egui::Event::PointerMoved(point) = event {
+                pointer_pos = Some(point);
+                if over_video(point) && !local_drag {
+                    self.move_pointer(input::normalized_point(video_rect, point), now);
+                }
+            } else if let egui::Event::MouseWheel { delta, .. } = event {
+                if delta.y != 0.0 && pointer_pos.is_some_and(over_video) && !local_drag {
+                    self.send_pointer(if delta.y > 0.0 { 1 } else { -1 });
+                }
+            } else if matches!(event, egui::Event::PointerGone) {
+                pointer_pos = None;
             }
         }
-        if scroll != 0.0 && pos.is_some_and(|p| video_rect.contains(p)) {
-            // HID wheel is discrete; scale / clamp UI pixel deltas.
-            let wheel = if scroll > 0.0 { 1 } else { -1 };
-            self.send_pointer(wheel);
+        if self.remote {
+            self.pointer_pos = pointer_pos;
+            // Retry the final throttled motion even when the next frame has no mouse events.
+            if let Some(point) = pointer_pos.filter(|point| over_video(*point) && !local_drag) {
+                self.move_pointer(input::normalized_point(video_rect, point), now);
+            }
         }
+    }
+
+    fn move_pointer(&mut self, point: (f32, f32), now: Instant) {
+        if now < self.next_mouse_update { return; }
+        if (self.last_mouse.0 - point.0).abs() > 0.0002 ||
+           (self.last_mouse.1 - point.1).abs() > 0.0002 {
+            self.last_mouse = point;
+            self.send_pointer(0);
+        }
+        self.next_mouse_update = now + Duration::from_millis(12);
     }
 }
 
 impl eframe::App for Viewer {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         if !self.remote { return; }
+        let video_id = egui::Id::new("video");
+        if !input.focused || input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))) {
+            self.release_remote();
+            ctx.memory_mut(|memory| memory.surrender_focus(video_id));
+            return;
+        }
+        let local_click = input.events.iter().any(|event| {
+            matches!(event, egui::Event::PointerButton { pos, pressed: true, .. }
+                if !ctx.read_response(video_id).is_some_and(|video|
+                    video.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(video.layer_id)))
+        });
+        if local_click { ctx.memory_mut(|memory| memory.surrender_focus(video_id)); }
+        if !ctx.memory(|memory| memory.has_focus(video_id)) {
+            if self.keyboard.bytes() != [0; 8] || self.buttons != 0 {
+                self.release_held_input();
+            }
+            return;
+        }
         // EgUI 0.31 provides Ctrl/Alt/Shift but NOT native Super state on Linux.
         if input::sync_modifiers(&mut self.keyboard, input.modifiers, self.remote_super) {
             self.send_keyboard();
         }
         for event in &input.events {
+            if !self.remote { break; }
             if let egui::Event::Key { key, pressed, repeat, .. } = event {
                 if *key == egui::Key::Escape && *pressed {
                     self.release_remote();
@@ -467,6 +515,11 @@ impl eframe::App for Viewer {
                 }
             }
         }
+        // Remote keyboard events must not also activate or edit local widgets.
+        input.events.retain(|event| !matches!(event,
+            egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Copy |
+            egui::Event::Cut | egui::Event::Paste(_) | egui::Event::Ime(_)));
+        input.modifiers = egui::Modifiers::default();
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -498,6 +551,7 @@ impl Drop for Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::App;
     use crate::worker::Worker;
     use crossbeam_channel::Sender;
     use std::{io::{self, Write}, sync::{Mutex, atomic::Ordering}, thread};
@@ -507,6 +561,181 @@ mod tests {
             video: "/nonexistent-nanokvm-t05/video".into(),
             serial: "/nonexistent-nanokvm-t05/serial".into(),
         })
+    }
+
+    fn input_frame(app: &mut Viewer, ctx: &egui::Context, events: Vec<egui::Event>, local_text: &mut String) {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        app.raw_input_hook(ctx, &mut raw);
+        let _ = ctx.run(raw, |ctx| {
+            egui::TopBottomPanel::top("test_local_controls").show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(local_text).id(egui::Id::new("local_text")));
+            });
+            app.render_video(ctx);
+        });
+    }
+
+    fn input_viewer() -> (Viewer, egui::Context, Receiver<Report>) {
+        let mut app = viewer();
+        let (port, reports) = serial::tests::queued_port();
+        app.serial = Some(port);
+        app.serial_ready = true;
+        app.remote = true;
+        app.image = Some(Arc::new(RgbaFrame { width: 4, height: 3, rgba: vec![0; 48] }));
+        let ctx = egui::Context::default();
+        input_frame(&mut app, &ctx, vec![], &mut String::new());
+        (app, ctx, reports)
+    }
+
+    fn pointer_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    fn key(key: egui::Key, pressed: bool) -> egui::Event {
+        egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: egui::Modifiers::default() }
+    }
+
+    #[test]
+    fn keyboard_focus_separates_local_text_and_remote_reports() {
+        let (mut app, ctx, reports) = input_viewer();
+        let mut local = String::new();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("local_text")));
+        input_frame(&mut app, &ctx, vec![key(egui::Key::A, true), egui::Event::Text("a".into())], &mut local);
+        assert_eq!(local, "a");
+        assert!(reports.is_empty());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        input_frame(&mut app, &ctx, vec![
+            key(egui::Key::B, true), egui::Event::Text("b".into()),
+            egui::Event::Paste("pasted".into()), egui::Event::Copy, egui::Event::Cut,
+            egui::Event::Ime(egui::ImeEvent::Commit("ime".into())),
+        ], &mut local);
+        assert_eq!(local, "a");
+        assert!(matches!(reports.try_recv().unwrap(), Report::Keyboard(bytes) if bytes[2] == 5));
+        assert!(reports.is_empty());
+        input_frame(&mut app, &ctx, vec![key(egui::Key::Escape, true), egui::Event::Text("leak".into())], &mut local);
+        assert!(!app.remote && local == "a");
+        assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+    }
+
+    #[test]
+    fn local_clicks_do_not_move_remote_pointer_and_release_held_input() {
+        let (mut app, ctx, reports) = input_viewer();
+        let outside = egui::pos2(40.0, 10.0);
+        app.last_mouse = (0.25, 0.75);
+        input_frame(&mut app, &ctx, vec![pointer_button(outside, true), pointer_button(outside, false)], &mut String::new());
+        assert!(reports.is_empty());
+        assert_eq!(app.last_mouse, (0.25, 0.75));
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        app.keyboard.set_key(4, true);
+        app.keyboard.modifiers = protocol::modifiers::LEFT_SUPER;
+        app.remote_super = true;
+        app.buttons = 1;
+        input_frame(&mut app, &ctx, vec![pointer_button(outside, true), pointer_button(outside, false)], &mut String::new());
+        assert_eq!(app.keyboard.bytes(), [0; 8]);
+        assert_eq!(app.buttons, 0);
+        assert!(matches!(reports.try_recv().unwrap(), Report::Release(bytes)
+            if bytes == protocol::mouse_absolute(0, 0.25, 0.75, 0)));
+        assert!(reports.is_empty());
+        assert!(app.remote_super);
+        input_frame(&mut app, &ctx, vec![], &mut String::new());
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn video_press_acquires_input_and_drag_release_keeps_last_remote_position() {
+        let (mut app, ctx, reports) = input_viewer();
+        app.remote = false;
+        let rect = ctx.read_response(egui::Id::new("video")).unwrap().rect;
+        let inside = rect.center();
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside), pointer_button(inside, true)], &mut String::new());
+        assert!(app.remote && app.buttons == 1);
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("video"))));
+        let last = app.last_mouse;
+        reports.try_iter().for_each(drop);
+        let outside = egui::pos2(40.0, 10.0);
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(outside), pointer_button(outside, false)], &mut String::new());
+        assert_eq!(app.buttons, 0);
+        assert_eq!(app.last_mouse, last);
+        assert!(matches!(reports.try_recv().unwrap(), Report::AbsoluteMouse(bytes)
+            if bytes == protocol::mouse_absolute(0, last.0, last.1, 0)));
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn local_drag_into_video_does_not_become_remote_input() {
+        let (mut app, ctx, reports) = input_viewer();
+        let inside = ctx.read_response(egui::Id::new("video")).unwrap().rect.center();
+        let mut text = "local selection".to_owned();
+        let outside = egui::pos2(40.0, 10.0);
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(outside), pointer_button(outside, true)], &mut text);
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside)], &mut text);
+        input_frame(&mut app, &ctx, vec![pointer_button(inside, false)], &mut text);
+        assert!(reports.is_empty());
+        assert_eq!(app.buttons, 0);
+    }
+
+    #[test]
+    fn release_during_a_drag_does_not_recapture_on_the_next_frame() {
+        let (mut app, ctx, reports) = input_viewer();
+        let inside = ctx.read_response(egui::Id::new("video")).unwrap().rect.center();
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside), pointer_button(inside, true)], &mut String::new());
+        input_frame(&mut app, &ctx, vec![key(egui::Key::Escape, true)], &mut String::new());
+        assert!(!app.remote);
+        reports.try_iter().for_each(drop);
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside), pointer_button(inside, false)], &mut String::new());
+        assert!(!app.remote && app.buttons == 0);
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn scroll_uses_pointer_location_at_the_event() {
+        let (mut app, ctx, reports) = input_viewer();
+        let inside = ctx.read_response(egui::Id::new("video")).unwrap().rect.center();
+        let outside = egui::pos2(40.0, 10.0);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 20.0), modifiers: egui::Modifiers::default() };
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(outside), wheel.clone(), egui::Event::PointerMoved(inside)], &mut String::new());
+        for report in reports.try_iter() {
+            assert!(matches!(report, Report::AbsoluteMouse(bytes) if bytes == protocol::mouse_absolute(0, 0.5, 0.5, 0)));
+        }
+        input_frame(&mut app, &ctx, vec![wheel, egui::Event::PointerMoved(outside)], &mut String::new());
+        assert!(matches!(reports.try_recv().unwrap(), Report::AbsoluteMouse(bytes)
+            if bytes == protocol::mouse_absolute(0, 0.5, 0.5, 1)));
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn focus_loss_releases_input_before_forwarding_the_batch() {
+        let (mut app, ctx, reports) = input_viewer();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+        app.keyboard.set_key(4, true);
+        app.remote_super = true;
+        app.buttons = 7;
+        input_frame(&mut app, &ctx, vec![key(egui::Key::B, true), egui::Event::WindowFocused(false)], &mut String::new());
+        assert!(!app.remote && !app.remote_super);
+        assert_eq!(app.keyboard.bytes(), [0; 8]);
+        assert_eq!(app.buttons, 0);
+        assert!(matches!(reports.try_recv().unwrap(), Report::Release(bytes)
+            if bytes == protocol::mouse_absolute(0, 0.5, 0.5, 0)));
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn final_throttled_motion_is_sent_without_another_pointer_event() {
+        let (mut app, ctx, reports) = input_viewer();
+        let rect = ctx.read_response(egui::Id::new("video")).unwrap().rect;
+        let point = rect.center();
+        app.last_mouse = (0.0, 0.0);
+        app.next_mouse_update = Instant::now() + Duration::from_secs(1);
+        input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(point)], &mut String::new());
+        assert!(reports.is_empty());
+        app.next_mouse_update = Instant::now();
+        input_frame(&mut app, &ctx, vec![], &mut String::new());
+        let Report::AbsoluteMouse(bytes) = reports.try_recv().unwrap() else { panic!("expected mouse motion"); };
+        assert_eq!(bytes, protocol::mouse_absolute(0, 0.5, 0.5, 0));
+        assert!(reports.is_empty());
     }
 
     struct Port {

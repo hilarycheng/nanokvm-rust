@@ -112,6 +112,16 @@ pub fn spawn(port_path: String) -> SerialHandle {
 pub(crate) mod tests {
     use super::*;
 
+    pub fn queued_port() -> (SerialHandle, Receiver<Report>) {
+        let (tx, pending) = bounded(256);
+        let (_, status_rx) = bounded(1);
+        let worker = Worker::spawn(|stop| {
+            while !stop.load(Ordering::Acquire) { std::thread::park_timeout(Duration::from_millis(1)); }
+            Ok(())
+        });
+        (SerialHandle { tx, pending: pending.clone(), status_rx, worker }, pending)
+    }
+
     pub fn spawn_port(mut port: impl Write + Send + 'static) -> SerialHandle {
         let (tx, rx) = bounded(256);
         let pending = rx.clone();

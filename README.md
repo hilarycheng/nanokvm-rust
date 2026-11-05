@@ -50,8 +50,10 @@ Supplying CLI paths also selects manual mode. Multiple candidates or unsupported
 Disconnect clears local input and video, stops both workers, and attempts neutral HID reports before serial closes.
 Connect becomes available after both workers finish. App exit uses the same shutdown path.
 
-Once serial is ready and a video frame is available, use Capture input or double-click the image.
-Escape or Release input ends remote input capture. Escape forwarding remains pending.
+Once serial is ready and a video frame is available, use Capture input or click the image.
+Keyboard reports follow video focus. Clicking local controls releases held remote input and keeps local typing local.
+Pointer presses belong to the video only when they start there. Releasing a video drag outside the image releases its remote button.
+With video keyboard focus, Escape releases input. Release input also ends forwarding. Escape forwarding remains pending.
 
 Release input clears queued input and requests neutral reports while devices remain connected. Disconnect closes both device workers.
 
@@ -67,7 +69,8 @@ Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件�
 ## 已知限制
 
 - 只有畫面上嘅 Super toggle。實體 Meta／Super capture 同 Wayland shortcut inhibition 未完成。
-- Ctrl+C／V／X、部分 Shift 符號、modifier 時序及本機／遠端輸入隔離有已重現問題。
+- Ctrl+C/V/X, some Shift symbols, and modifier ordering remain unresolved under T-08.
+- Local input isolation has software coverage under T-09. Focus Mode and screenshot selection integration remain pending.
 - Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
 - A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
 - Automatic pairing supports the recorded T-04 USB profile. Multiple candidates and unknown layouts require manual paths.
@@ -86,7 +89,7 @@ cargo test --all-targets
 
 另外 6 個臨時測試成功重現已知問題，並未加入此 repo。WGSL 通過 Naga 24.0.0 靜態驗證。GPU 實際 render 因環境沒有可用 Vulkan adapter 而未能執行。NanoKVM、Sway 實機測試及 RAM 比較仍未執行。
 
-Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05 software checks and shutdown limits.
+Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05, T-07, and T-09 software checks and limits.
 See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
 
 ## Source 分工

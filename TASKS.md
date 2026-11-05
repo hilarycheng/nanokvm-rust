@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 7.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 8.
 
-**18 tasks: 6 delivered, 12 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 7 delivered, 11 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision adds T-07 disconnection checks and manual recovery evidence. T-07 stays open for Focus Mode inhibition integration under T-15.
+This revision delivers T-09 local and remote input isolation. T-07 stays open for Focus Mode inhibition integration under T-15.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -21,6 +21,7 @@ Revision 3 verifies the release build and existing tests under T-03. GPU renderi
 Revision 4 adds host USB/V4L2 enumeration evidence under T-04; it does not verify streaming or coordinated disconnect behavior.
 Revision 5 adds connection lifecycle software checks; revision 6 adds automatic discovery and pairing software checks.
 Revision 7 verifies unexpected cleanup, idle tty hangup, and manual serial recovery with software checks.
+Revision 8 verifies video keyboard ownership, local controls, pointer release, and focus loss through egui regression checks.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -32,7 +33,7 @@ Historical test results in SCOPE.md remain historical evidence.
 | GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | Controls, shader uniforms, preset saving, and startup loading exist. Rendering and persistence need acceptance. | T-11 |
 | Capture and release remote keyboard and mouse input | `remote` gates forwarding. Input release discards stale queued reports; shutdown attempts neutral reports directly. Failed device writes still cannot guarantee remote release. | T-05, T-08, T-09 |
 | Focus Mode captures keyboard input from Sway; local Right-Ctrl, Right-Alt release shortcut | No shortcut inhibition or right-side modifier tracking exists. Escape currently releases input. | T-15 |
-| Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Capture input / Release input is the only mode switch. Released input stops all forwarding. | T-09, T-15, T-16 |
+| Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Video clicks acquire input; local widgets retain keyboard ownership. Explicit Focus Mode and Non-Focus Mode toolbar actions remain absent. | T-09, T-15, T-16 |
 | Microsoft Remote Desktop-style top toolbar; pin, auto-hide, narrow reveal strip | A fixed top panel exists. Pinning, auto-hide, and the reveal strip are absent. | T-16 |
 | Toolbar Disconnect and Fullscreen actions | Fullscreen, Connect, and Disconnect exist. Toolbar styling and modes remain open. | T-05, T-16 |
 | Manual disconnect stops video and serial; clears input; attempts neutral reports before serial closes | Both workers have cancellation and completion tracking. Shutdown bypasses queued input and attempts both neutral reports. | T-05 |
@@ -42,7 +43,7 @@ Historical test results in SCOPE.md remain historical evidence.
 Current behavior conflicts with DESIGN.md in these areas:
 
 - Escape releases input instead of reaching the remote host; the required right-side release shortcut is absent.
-- Release input disables forwarding; it does not provide the required Non-Focus Mode behavior.
+- Release input disables forwarding until a fresh video press or Capture input. Explicit Focus Mode and Non-Focus Mode remain absent.
 - The GPU panel advises GPU-only tuning; DESIGN.md permits V4L2 gamma and GPU gamma together.
 - T-07 verifies current input cleanup on unexpected disconnection. Focus Mode inhibition cleanup remains unverified until T-15 implements inhibition.
 
@@ -125,13 +126,17 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: shortcuts, Shift punctuation, presses, and releases reach the target correctly, including with an empty local clipboard.
   - Evidence: focused regression checks cover clipboard shortcuts, physical mapping, and multiple modifier changes within one event batch.
 
-- [ ] **T-09 — Isolate local controls and remote pointer input**
+- [x] **T-09 — Isolate local controls and remote pointer input**
   - Basis: DESIGN.md keyboard/mouse control and Non-Focus Mode; F6/F7. Depends on T-05 and T-08.
   - Touchpoints: `raw_input_hook`, `render_video`, `handle_mouse`, local widgets, and input release handling.
   - Work: define video interaction ownership for normal VNC-style input. Keep toolbar, settings, and screenshot gestures local.
   - Done: forwarded keyboard input does not also edit local widgets. Local toolbar clicks do not move the remote pointer.
   - Done: dragging outside the image still releases held buttons. Focus loss clears held input without leaving stuck keys.
   - Evidence: regression checks cover local text focus, outside-image clicks, drag release, and window focus loss.
+  - Scope order (2026-11-05): the user approved T-09 ahead of T-08. Input isolation is verified independently; keyboard mapping acceptance remains under T-08.
+  - Result: [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md#t-09-input-ownership-and-focus-release) records 39 passing tests, including eight egui input checks. Video focus owns keyboard reports; local keyboard events remain local. Only video-owned button presses produce remote releases.
+  - Result: single video presses acquire input. Local interaction releases held reports without moving the remote pointer. Focus loss clears capture, held keys, and buttons; a released drag cannot silently recapture input.
+  - Limit: T-15 must integrate explicit modes and Sway inhibition. T-18 must suspend forwarding during screenshot selection. Neither future feature is claimed by these software checks.
 
 - [ ] **T-15 — Implement Focus Mode, Non-Focus Mode, and local release**
   - Basis: DESIGN.md input modes and Sway keyboard capture. Depends on T-08 and T-09.
@@ -233,12 +238,12 @@ T-14 reconciles the remaining documentation after implementation.
 | Initial artifacts | T-01, T-02 | 2 | 0 |
 | Build and device evidence | T-03, T-04 | 2 | 0 |
 | Connection and cleanup | T-05, T-06, T-07 | 2 | 1 |
-| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 0 | 4 |
+| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 1 | 3 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 6 | 12 |
+| Total | T-01–T-18 | 7 | 11 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.
