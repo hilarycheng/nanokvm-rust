@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 12.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 13.
 
 **18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision adds T-12 native-resolution PNG and lossless WebP screenshots before GPU tuning. T-12 remains open for explicit mode and final toolbar acceptance under T-15/T-16. T-07, T-10, and T-11 retain their recorded integration requirements.
+This revision reconciles English operating documentation and records T-14 integration checks. All 56 app tests, including GPU rendering, and two backend tests pass. T-14 remains open for missing features and hardware acceptance; T-13 is deferred at the user's request.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -26,6 +26,7 @@ Revision 9 preserves keyboard input before clipboard translation and verifies ph
 Revision 10 adds optional F12-to-Meta forwarding, release checks, and a toolbar mapping control.
 Revision 11 verifies offscreen rendering on an RX 6600, validates presets, and reports persistence errors in the GPU panel.
 Revision 12 adds asynchronous full-video screenshots with exclusive file creation and retained keyboard ownership.
+Revision 13 adds the current acceptance matrix in [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md).
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -51,8 +52,8 @@ Current behavior conflicts with DESIGN.md in these areas:
 - GPU guidance now permits both gamma controls together; the separate V4L2 panel still awaits T-17.
 - T-07 verifies current input cleanup on unexpected disconnection. Focus Mode inhibition cleanup remains unverified until T-15 implements inhibition.
 
-SCOPE.md predates these requirements. Its screenshot-format questions, input terminology, and physical-Meta-only target do not override DESIGN.md.
-T-14 reconciles the remaining documentation after implementation.
+SCOPE.md now distinguishes historical proposals from current decisions and DESIGN.md requirements.
+T-14 reconciles the operating documentation while retaining open implementation and hardware acceptance gates.
 
 ## Delivered artifacts
 
@@ -242,6 +243,7 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: compare original, Rust baseline, and final implementation under matching hardware, resolution, FPS, and workload.
   - Evidence: record steady-state usage, peaks, and long-session trends. Optimize measured costs without losing validation or hardware calibration.
   - Final comparison follows the functional tasks. Do not promise an unmeasured memory limit or percentage reduction.
+  - Deferred (2026-11-05): the user asked not to run the proposed comparison yet. No benchmark or optimization was performed; resume only when requested.
 
 - [ ] **T-14 — Complete integration acceptance and operating documentation**
   - Basis: every DESIGN.md requirement plus retained supplementary scope. Depends on T-03 through T-13 and T-15 through T-18.
@@ -252,6 +254,9 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: operating documentation uses English and matches actual behavior, terminology, capture choices, and limitations.
   - Done: reconcile historical SCOPE.md assumptions and approval wording. Do not modify AGENTS.md or DESIGN.md.
   - Evidence: retain commands, environment, results, and remaining limitations. Reuse unaffected checks instead of repeating them unnecessarily.
+  - Result: [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md) maps every design requirement and supplementary scope to evidence and remaining checks. The release build, 56 app tests including GPU rendering, and two backend tests pass.
+  - Result: README.md and SCOPE.md now use English and match current controls, screenshot choices, limitations, and historical evidence. AGENTS.md and DESIGN.md remain unchanged.
+  - Remaining: T-15 through T-18 require implementation; T-07/T-10/T-11/T-12 retain integration gates. Live NanoKVM/Sway and natural-color checks remain NOT RUN. T-13 remains deferred. Do not mark T-14 complete.
 
 ## Progress and maintenance
 

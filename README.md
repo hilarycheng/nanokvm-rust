@@ -1,143 +1,164 @@
 # NanoKVM USB — Rust Viewer
 
-原生 Linux NanoKVM USB viewer。目標係支援實體 Meta／Super、可調整至自然嘅畫面，以及較低 RAM 用量。
+A native Linux NanoKVM USB viewer built with Rust, egui/eframe, and wgpu.
+It provides MJPEG video, serial keyboard/mouse forwarding, GPU color controls, and full-video screenshots.
+Integration acceptance remains open; see [the acceptance record](INTEGRATION-VERIFICATION.md) and [task status](TASKS.md).
 
-目前係可編譯嘅 MVP。鍵鼠轉發有已知問題，完整硬件行為尚未驗證。
+The intended environment is Ubuntu with Sway → NanoKVM USB → Arch Linux with GNOME.
+Physical Meta capture, explicit input modes, the final toolbar, V4L2 image controls, and area screenshots remain pending.
+Lower RAM usage than the original application has not been measured. T-13 is deferred at the user's request.
 
-- [Scope、功能差距及驗證紀錄](SCOPE.md)
-- [工作清單及完成進度](TASKS.md)
-- [Agent 工作規則及 APPROVE 流程](AGENTS.md)
+## Build and start
 
-## 目標環境
-
-沿用原 project 設定：Ubuntu + Sway host → NanoKVM USB → Arch Linux + GNOME target。
-
-## 目前已有
-
-- 獨立 capture thread 經 V4L2 讀取 UVC MJPEG，再解碼成 RGBA。
-- 要求 1920×1080 MJPG；實際解像度採用裝置協商結果。
-- 透過 `wgpu`／WGSL 顯示影像及調色。
-- Gamma、Exposure、Highlights、White peak、Saturation controls。
-- Reset、Soft white preset、儲存及啟動時載入調色設定。
-- 基本 keyboard HID、absolute mouse、Capture input／Release input。
-- 獨立 serial thread，以 57,600 baud 發送 reports。
-
-## 目前啟動方式
-
-需要 Rust toolchain、eframe／wgpu 及 V4L2 所需系統 libraries，以及 video／serial device 存取權限。
-
-The app starts disconnected. Without CLI paths, Automatic devices scans for the supported NanoKVM USB layout.
-Select Connect to rescan and open video plus serial. Rescan alone never connects.
-
-建置 release binary，並複製到 project root：
+Install a Rust toolchain and the native development libraries required by eframe/wgpu and V4L2.
+The runtime needs a working graphics backend and permission to access the video and serial devices.
+[Build verification](BUILD-VERIFICATION.md) records the tested toolchain and system libraries.
+Cargo.lock pins dependencies; the repository includes a patched egui-winit 0.31.1 for native keyboard events.
 
 ```sh
 ./build.sh
+./nanokvm-rust
 ```
 
-輸出檔案為 `./nanokvm-rust`。Build artifacts 留喺 `target/`。
-
-亦可直接用 Cargo 執行：
+The build script copies the release executable to the project root. Build artifacts remain in target/.
+Check the build exit status: a failed build can leave an older root executable in place.
+Alternatively:
 
 ```sh
 cargo run --release
-# Optional manual override:
+# Manual device paths:
 cargo run --release -- --video /dev/video0 --serial /dev/ttyUSB0
 ```
 
-For manual paths, disable Automatic devices and set both Video and Serial in the status bar.
-Supplying CLI paths also selects manual mode. Multiple candidates or unsupported layouts require manual selection.
-Disconnect clears local input and video, stops both workers, and attempts neutral HID reports before serial closes.
-Connect becomes available after both workers finish. App exit uses the same shutdown path.
+Use `./nanokvm-rust --help` for CLI usage.
 
-Once serial is ready and a video frame is available, use Capture input or click the image.
+## Connect and disconnect
+
+The app starts disconnected. Automatic devices scans for the supported NanoKVM USB layout without opening a capture session.
+Select Connect to rescan and start video plus serial. Rescan alone never connects.
+The viewer requests 1920×1080 MJPG and uses the negotiated dimensions. Serial reports use 57,600 baud.
+
+Automatic pairing supports the [recorded USB identity and topology](DEVICE-IDENTIFICATION.md).
+For ambiguous candidates or unsupported layouts, disable Automatic devices and set both Video and Serial in the status bar.
+CLI device paths also select manual mode. Device paths can change after reconnection; verify them before connecting manually.
+
+Disconnect clears local input and video, stops both workers, and attempts neutral keyboard and mouse reports before serial closes.
+Either worker failing initiates the same cleanup. The app never reconnects automatically.
+After both workers finish, select Connect to retry. Input capture starts disabled after reconnection.
+App exit requests the same cleanup and waits against a shared two-second deadline.
+
+A worker that ignores cancellation keeps Connect unavailable. The status bar reports delayed shutdown after two seconds.
+Failed serial writes cannot guarantee remote key release. Successful local writes do not acknowledge remote HID delivery.
+
+## Keyboard and mouse
+
+Once serial is ready and video is available, select Capture input or click the image.
 Keyboard reports follow video focus. Clicking local controls releases held remote input and keeps local typing local.
-Pointer presses belong to the video only when they start there. Releasing a video drag outside the image releases its remote button.
-With video keyboard focus, Escape releases input. Release input also ends forwarding. Escape forwarding remains pending.
+Pointer presses belong to video only when they start there. Releasing a video drag outside releases its remote button.
+Window focus loss clears input capture and held state.
 
-Enable F12 → Meta in the toolbar to use held F12 as remote Meta while video has keyboard focus.
-Release F12 to release its Meta hold. The Super toggle independently holds Meta until turned off.
-The mapping defaults off at startup; turn it off to send ordinary F12. Changing the mapping releases held remote input.
-The setting lasts for the current application session, including disconnect/reconnect.
+With video keyboard focus, Escape releases input. Release input also ends forwarding while keeping the devices connected.
+Click video or select Capture input to resume. Escape forwarding and the Right-Ctrl, Right-Alt release shortcut await T-15.
+Explicit Focus Mode, Non-Focus Mode, and Sway shortcut inhibition are not implemented.
+Host shortcuts can therefore intercept keys intended for the remote machine.
 
-Release input clears queued input and requests neutral reports while devices remain connected. Disconnect closes both device workers.
+Enable F12 → Meta to use held F12 as remote Meta while video has keyboard focus.
+Release F12 to release its Meta hold. The Super toggle independently controls a Meta hold.
+Local interactions release the HID modifier; returning to video reapplies a selected Super toggle.
+Release input, focus loss, and disconnect clear that toggle and mapped holds.
+
+F12 mapping defaults off. Disable it to send ordinary F12; changing the mapping releases held remote input.
+The mapping preference lasts for the application session, including disconnect/reconnect.
+Ctrl+C/V/X, physical-key mapping, modifier ordering, and local input isolation have software regression coverage.
+Sway and NanoKVM HID delivery remain unverified.
+
+Fullscreen and Windowed change the viewer window. The current fixed toolbar has no pinning or auto-hide.
+Opening Color releases input capture. Resume explicitly when finished adjusting colors.
 
 ## Screenshots
 
 Use Screenshot PNG for the primary format or Screenshot WebP for lossless WebP.
 Both save the complete decoded remote video at its native resolution, before GPU tuning.
-The saved image excludes the viewer toolbar, borders, and local desktop.
+Saved images exclude viewer controls, borders, and the local desktop.
 Device-side processing already present in the captured frame remains included.
 
 Files go to ~/Pictures/NanoKVM with timestamp-based names. Existing files are never overwritten.
-The toolbar reports the saved path or failure. One export runs at a time, without blocking the UI.
+The toolbar reports the saved path or failure. One export runs at a time without blocking the UI.
 Screenshot clicks preserve existing video keyboard ownership and held keys; local keyboard ownership stays local.
-Disconnect does not change an already requested snapshot. App exit requests cancellation and waits within the shared shutdown deadline.
-Explicit Focus Mode and Non-Focus Mode acceptance awaits T-15. Area capture remains under T-18.
+Disconnect does not change an already requested snapshot.
 
-## 調色設定
+App exit requests cancellation within the shared shutdown deadline.
+Forced termination during a write can leave a partial new image; existing images remain protected.
+Area capture is not implemented. Explicit mode and final toolbar acceptance await T-15, T-16, and T-18.
 
-Color 面板只調整遠端影像。Save preset 儲存至：
+## GPU color controls
 
-- `$XDG_CONFIG_HOME/nanokvm-rust/colors.json`；或
-- `~/.config/nanokvm-rust/colors.json`。
+Open Color for Exposure, Gamma, Highlights, White peak, and Saturation. Hover over each control for guidance.
+GPU adjustments follow V4L2 device processing; both gamma controls can be active together.
+The separate V4L2 image-control panel is not implemented.
 
-Hover over each GPU control for its effect. GPU adjustments follow V4L2 device processing; both gamma controls can be active together.
-The separate V4L2 panel remains pending. Reset 1:1 resets GPU adjustments only; Soft white sets white peak to 0.84.
-Neither button changes the saved preset until Save preset is selected.
+Reset 1:1 restores neutral GPU settings only. Soft white resets other controls and sets white peak to 0.84.
+Neither action changes the saved preset until Save preset is selected.
+GPU presets affect the displayed video, not device settings, desktop colors, or exported screenshots.
 
-Startup restores finite preset values within the control ranges. Missing, invalid, or unreadable presets use GPU defaults with a status message.
-Save preset writes a complete temporary file before replacing the saved preset. Failures preserve the previous preset and show their cause.
-Empty or relative XDG_CONFIG_HOME values fall back to an absolute HOME; unavailable configuration paths are reported.
+Save preset writes to:
 
-RX 6600 offscreen rendering verifies the GPU controls and Reset. Natural-color acceptance still needs NanoKVM hardware reference images.
-Contrast, Temperature/Tint, and comparison views remain outside this task.
+- `$XDG_CONFIG_HOME/nanokvm-rust/colors.json` when XDG_CONFIG_HOME is absolute.
+- `~/.config/nanokvm-rust/colors.json` otherwise, when HOME is absolute.
 
-## 已知限制
+Startup restores valid preset values. Missing, invalid, or unreadable presets use defaults with a status message.
+Saving writes and syncs a new temporary file before replacing the preset. Reported failures preserve the previous preset.
+Unavailable configuration paths produce an error. Concurrent saves use the last successful replacement.
+[Color verification](COLOR-VERIFICATION.md) records ranges, persistence checks, and RX 6600 offscreen rendering results.
+Natural-color acceptance still needs NanoKVM reference images and combined V4L2/GPU checks.
 
-- Optional F12 mapping and the Super toggle provide remote Meta. Physical Meta capture and Wayland shortcut inhibition remain absent.
-- Ctrl+C/V/X, Shift punctuation, and modifier ordering have software coverage under T-08. Hardware HID delivery remains unverified.
-- The pinned egui-winit patch preserves keys before clipboard translation. Recheck it before upgrading egui/eframe.
-- Local input isolation has software coverage under T-09. Focus Mode and screenshot selection integration remain pending.
-- Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
-- A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
-- Automatic pairing supports the recorded T-04 USB profile. Multiple candidates and unknown layouts require manual paths.
-- Full-video PNG/WebP screenshots are available. Area capture and explicit mode acceptance remain pending.
-- 尚未量度原版同 Rust viewer 嘅 RAM 差距。
+## Troubleshooting and validation
 
-完整問題及證據見 [SCOPE.md](SCOPE.md)。
+| Symptom | Action or limitation |
+| --- | --- |
+| No automatic pair | Check device permissions and the supported identity profile; use verified manual paths for unsupported layouts. |
+| Video or serial stops | Read the status, resolve the device problem, and reconnect manually after cleanup. |
+| Video wait timeout | A frame wait exceeding 500 ms ends the stream; the viewer does not retry that stream automatically. |
+| Connect stays disabled | Wait for both workers to stop. A driver that ignores timeouts may delay closure. |
+| Remote input does not arrive | Confirm video focus and capture state; Sway may intercept shortcuts until T-15. |
+| Screenshot or preset fails | Read the displayed cause and check the destination permissions and absolute HOME/XDG paths. |
 
-## 驗證狀態
-
-2026-10-31 嘅分析曾於 `/tmp` 獨立副本完成 crate test build。Rust 1.97.1 下，原有 5 個 protocol tests 全部通過。
+Run the application and patched input-backend tests:
 
 ```sh
-cargo test --all-targets
+cargo test --release --locked --all-targets
+# Requires an accessible GPU:
+cargo test --release --locked --all-targets -- --include-ignored --nocapture
+# Avoid connecting the backend test to the desktop clipboard:
+env -u DISPLAY -u WAYLAND_DISPLAY cargo test --release --locked -p egui-winit --lib
 ```
 
-另外 6 個臨時測試成功重現已知問題，並未加入此 repo。WGSL 通過 Naga 24.0.0 靜態驗證。GPU 實際 render 因環境沒有可用 Vulkan adapter 而未能執行。NanoKVM、Sway 實機測試及 RAM 比較仍未執行。
+The [integration record](INTEGRATION-VERIFICATION.md) maps every design requirement to evidence and remaining acceptance.
+It distinguishes automated checks from NanoKVM and Sway hardware checks.
+Recheck the pinned egui-winit patch before upgrading egui/eframe.
+[Scope](SCOPE.md) preserves the original requirements and audit findings with their current status.
+[AGENTS.md](AGENTS.md) defines project rules and the explicit approval requirement for code changes.
 
-Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05, T-07, and T-09 software checks and limits.
-See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
-See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08/T-10 checks, mapping limits, and the native input patch.
-See [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) for current T-11 GPU rendering, preset checks, and remaining acceptance.
-See [SCREENSHOT-VERIFICATION.md](SCREENSHOT-VERIFICATION.md) for T-12 output decisions, file safety, and input ownership checks.
+## Source map
 
-## Source 分工
-
-| 檔案 | 責任 |
+| File | Responsibility |
 | --- | --- |
-| [main.rs](src/main.rs) | CLI 參數及 App 啟動 |
-| [app.rs](src/app.rs) | GUI、輸入狀態、連接操作及設定 |
-| [capture.rs](src/capture.rs) | V4L2 MJPEG 擷取及解碼 |
+| [main.rs](src/main.rs) | CLI and application startup |
+| [app.rs](src/app.rs) | GUI, input ownership, connection lifecycle, and settings |
+| [discovery.rs](src/discovery.rs) | Supported USB identity and topology matching |
+| [capture.rs](src/capture.rs) | V4L2 MJPEG capture and decoding |
 | [screenshot.rs](src/screenshot.rs) | Native-frame PNG/WebP export and exclusive file creation |
-| [gpu.rs](src/gpu.rs)、[color.wgsl](src/color.wgsl) | Texture upload、GPU rendering 及調色 |
-| [input.rs](src/input.rs) | Keyboard mapping、modifiers 及影像座標換算 |
-| [protocol.rs](src/protocol.rs) | Serial framing、HID reports 及 protocol tests |
-| [serial.rs](src/serial.rs) | Serial worker 及 report queue |
+| [gpu.rs](src/gpu.rs), [color.wgsl](src/color.wgsl) | Texture upload, rendering, and GPU color processing |
+| [input.rs](src/input.rs) | Keyboard mapping, modifiers, and image coordinates |
+| [protocol.rs](src/protocol.rs) | Serial framing and HID reports |
+| [serial.rs](src/serial.rs) | Serial worker and report queue |
+| [worker.rs](src/worker.rs) | Shared cancellation and completion tracking |
+| [vendor/egui-winit](vendor/egui-winit) | Native keyboard events before local clipboard translation |
 
-## Protocol 參考
+## Protocol reference and license
 
-參考 `sipeed/NanoKVM-USB@1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc` 嘅 [proto.ts](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/desktop/src/main/device/proto.ts)、[device/index.ts](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/desktop/src/main/device/index.ts) 及 renderer keyboard／mouse／media 實作。
-
-`Cargo.toml` 聲明 `GPL-3.0-only`。上游授權見 [LICENSE](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/LICENSE)。
+Protocol work references `sipeed/NanoKVM-USB@1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc`:
+[proto.ts](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/desktop/src/main/device/proto.ts),
+[device/index.ts](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/desktop/src/main/device/index.ts),
+and renderer keyboard/mouse/media handling.
+Cargo.toml declares GPL-3.0-only. See the [upstream license](https://github.com/sipeed/NanoKVM-USB/blob/1d1dd5e9fd24f97e9bf4a4ed6838e04ea4e48ecc/LICENSE).
