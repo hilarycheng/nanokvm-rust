@@ -1,4 +1,5 @@
 mod app;
+mod discovery;
 mod capture;
 mod gpu;
 mod input;
@@ -8,14 +9,14 @@ mod worker;
 
 fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
-    let mut video = String::from("/dev/video0");
+    let mut video = String::new();
     let mut serial = String::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--video" => video = args.next().unwrap_or_else(|| video.clone()),
             "--serial" => serial = args.next().unwrap_or_default(),
             "--help" | "-h" => {
-                println!("Usage: nanokvm-rust [--video /dev/video0] [--serial /dev/ttyACM0]");
+                println!("Usage: nanokvm-rust [--video PATH --serial PATH]\nWithout paths, discover NanoKVM automatically; Connect starts the devices.");
                 return Ok(());
             }
             _ => eprintln!("Ignoring unknown argument: {arg}"),

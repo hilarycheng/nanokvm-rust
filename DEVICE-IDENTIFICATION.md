@@ -78,7 +78,7 @@ Streaming, image quality, and serial HID output were not exercised.
 
 ## Missing, ambiguous, and multiple-device cases
 
-These are constraints for T-06 implementation, not current application behavior:
+These constraints were recorded for T-06. Its implementation and software evidence are now in [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md).
 
 - No eligible capture or serial endpoint: report the missing component and do not select a pair.
 - Metadata-only video nodes: exclude them using device capabilities.
@@ -88,7 +88,7 @@ These are constraints for T-06 implementation, not current application behavior:
 - Re-enumeration: refresh the inventory and reject stale paths. Host port changes can change by-path links.
 
 Only the current single-candidate topology was observed.
-Absent and multiple-device behavior needs software tests under T-06; no such behavior is claimed as tested here.
+Absent and multiple-device behavior was not tested during T-04; T-06 now supplies software fixture coverage.
 
 ## Code handling at the T-04 snapshot
 

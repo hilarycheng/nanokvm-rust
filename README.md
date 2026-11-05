@@ -25,13 +25,17 @@
 
 需要 Rust toolchain、eframe／wgpu 及 V4L2 所需系統 libraries，以及 video／serial device 存取權限。
 
-The app starts disconnected, including when CLI device paths are supplied. Select Connect to open video and serial.
+The app starts disconnected. Without CLI paths, Automatic devices scans for the supported NanoKVM USB layout.
+Select Connect to rescan and open video plus serial. Rescan alone never connects.
 
 ```sh
-cargo run --release -- --video /dev/video0 --serial /dev/ttyACM0
+cargo run --release
+# Optional manual override:
+cargo run --release -- --video /dev/video0 --serial /dev/ttyUSB0
 ```
 
-Set both Video and Serial paths in the status bar. Connect starts both workers; automatic device discovery remains pending.
+For manual paths, disable Automatic devices and set both Video and Serial in the status bar.
+Supplying CLI paths also selects manual mode. Multiple candidates or unsupported layouts require manual selection.
 Disconnect clears local input and video, stops both workers, and attempts neutral HID reports before serial closes.
 Connect becomes available after both workers finish. App exit uses the same shutdown path.
 
@@ -55,7 +59,7 @@ Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件�
 - Ctrl+C／V／X、部分 Shift 符號、modifier 時序及本機／遠端輸入隔離有已重現問題。
 - Neutral reports bypass queued input on shutdown. Failed device writes cannot guarantee remote release.
 - A driver that ignores timeouts may delay closure. Reconnect stays unavailable while a worker remains alive.
-- 尚未自動識別及配對 USB serial／V4L2 devices。
+- Automatic pairing supports the recorded T-04 USB profile. Multiple candidates and unknown layouts require manual paths.
 - 尚未提供 Screenshot。
 - 尚未量度原版同 Rust viewer 嘅 RAM 差距。
 
@@ -72,6 +76,7 @@ cargo test --all-targets
 另外 6 個臨時測試成功重現已知問題，並未加入此 repo。WGSL 通過 Naga 24.0.0 靜態驗證。GPU 實際 render 因環境沒有可用 Vulkan adapter 而未能執行。NanoKVM、Sway 實機測試及 RAM 比較仍未執行。
 
 Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05 software checks and shutdown limits.
+See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
 
 ## Source 分工
 

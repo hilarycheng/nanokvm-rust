@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 5.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 6.
 
-**18 tasks: 5 delivered, 13 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 6 delivered, 12 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision delivers T-05 connection and shutdown handling with software checks. Physical unplugging is not required for this acceptance.
+This revision delivers T-06 automatic discovery for the recorded USB profile, with software checks and manual fallback.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -19,6 +19,7 @@ They are not additional requirements attributed to DESIGN.md.
 Revision 2 reviewed all eight files under `src/`, plus `Cargo.toml`, `build.sh`, and `.gitignore`.
 Revision 3 verifies the release build and existing tests under T-03. GPU rendering and hardware checks remain unverified.
 Revision 4 adds host USB/V4L2 enumeration evidence under T-04; it does not verify streaming or coordinated disconnect behavior.
+Revision 5 adds connection lifecycle software checks; revision 6 adds automatic discovery and pairing software checks.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -92,13 +93,15 @@ T-14 reconciles the remaining documentation after implementation.
   - Result: [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) records 15 passing tests and the release build. Startup is disconnected; retries wait for both workers to finish.
   - Limit: a kernel call that ignores its timeout cannot be forcibly cancelled by a Rust thread. The UI reports delayed shutdown and blocks reconnect; app exit waits at most two seconds.
 
-- [ ] **T-06 — Discover and pair devices automatically**
+- [x] **T-06 — Discover and pair devices automatically**
   - Basis: supplementary S5. Depends on T-04 and T-05.
   - Touchpoints: device enumeration, `Options`, CLI defaults, and connection UI.
   - Work: use verified identity and topology to select the matching video and serial devices.
   - Done: one identified NanoKVM needs no manual path selection. Replugging and changed device numbers preserve correct pairing.
   - Done: missing or ambiguous matches show a clear status. Discovery alone never starts streaming or serial I/O.
   - Evidence: software matching checks cover absent, single, multiple, and ambiguous candidates, plus removal and changed device numbers. Physical replug exercises are not required.
+  - Result: [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) records 27 passing tests and the release build. Automatic mode scans at startup, Rescan, and Connect without automatic reconnection.
+  - Limit: matching supports the T-04 VID/PID and hub-port profile only. Unknown topology and multiple candidates require manual paths; generic hardware with identical identities cannot be distinguished by inventory alone.
 
 - [ ] **T-07 — Clean up unexpected disconnections and support manual recovery**
   - Basis: DESIGN.md unexpected cleanup; supplementary S3. Depends on T-05; discovery is not a cleanup prerequisite.
@@ -225,13 +228,13 @@ T-14 reconciles the remaining documentation after implementation.
 | --- | --- | --- | --- |
 | Initial artifacts | T-01, T-02 | 2 | 0 |
 | Build and device evidence | T-03, T-04 | 2 | 0 |
-| Connection and cleanup | T-05, T-06, T-07 | 1 | 2 |
+| Connection and cleanup | T-05, T-06, T-07 | 2 | 1 |
 | Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 0 | 4 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 5 | 13 |
+| Total | T-01–T-18 | 6 | 12 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.

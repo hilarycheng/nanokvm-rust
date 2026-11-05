@@ -1,6 +1,8 @@
 use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
 use crate::worker::SHUTDOWN_TIMEOUT;
+use crate::discovery::{self, DevicePair};
+use crossbeam_channel::{bounded, Receiver};
 
 use crate::{capture::{self, CameraHandle, RgbaFrame}, gpu::{ColorSettings, GpuVideo, VideoCallback}, input, protocol::{self, KeyboardReport}, serial::{self, SerialHandle, Report}};
 
@@ -12,6 +14,10 @@ pub struct Options {
 pub struct Viewer {
     camera: Option<CameraHandle>,
     video_path: String,
+    automatic: bool,
+    discovery_status: String,
+    discovery_rx: Option<Receiver<Result<DevicePair, String>>>,
+    connect_after_discovery: bool,
     disconnecting: Option<Instant>,
     serial: Option<SerialHandle>,
     serial_path: String,
@@ -54,12 +60,17 @@ impl Viewer {
         }
         let mut app = Self::disconnected(opts);
         app.colors = colors;
+        if app.automatic { app.discover(false); }
         app
     }
 
     fn disconnected(opts: Options) -> Self {
         Self {
             camera: None,
+            automatic: opts.video.trim().is_empty() && opts.serial.trim().is_empty(),
+            discovery_status: "Disconnected".into(),
+            discovery_rx: None,
+            connect_after_discovery: false,
             video_path: opts.video,
             disconnecting: None,
             serial: None,
@@ -85,8 +96,47 @@ impl Viewer {
         }
     }
 
+    fn discover(&mut self, connect: bool) {
+        if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() || self.discovery_rx.is_some() { return; }
+        self.video_path.clear();
+        self.serial_path.clear();
+        self.discovery_status = "Looking for NanoKVM…".into();
+        self.connect_after_discovery = connect;
+        let (tx, rx) = bounded(1);
+        self.discovery_rx = Some(rx);
+        std::thread::spawn(move || { let _ = tx.send(discovery::detect()); });
+    }
+
+    fn refresh_discovery(&mut self) {
+        let Some(rx) = &self.discovery_rx else { return; };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Err("Device discovery stopped unexpectedly; rescan".into()),
+        };
+        self.discovery_rx = None;
+        let connect = std::mem::take(&mut self.connect_after_discovery);
+        match result {
+            Ok(pair) => {
+                self.video_path = pair.video;
+                self.serial_path = pair.serial;
+                self.discovery_status = "NanoKVM found".into();
+                if connect { self.connect_paths(); }
+            }
+            Err(error) => {
+                self.video_path.clear();
+                self.serial_path.clear();
+                self.discovery_status = error;
+            }
+        }
+    }
+
     fn connect(&mut self) {
-        if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() { return; }
+        if self.camera.is_some() || self.serial.is_some() || self.disconnecting.is_some() || self.discovery_rx.is_some() { return; }
+        if self.automatic { self.discover(true); } else { self.connect_paths(); }
+    }
+
+    fn connect_paths(&mut self) {
         if self.video_path.trim().is_empty() || self.serial_path.trim().is_empty() {
             self.video_status = "Set both Video and Serial paths before connecting".into();
             return;
@@ -108,6 +158,9 @@ impl Viewer {
     }
 
     fn disconnect(&mut self) {
+        self.discovery_rx = None;
+        self.connect_after_discovery = false;
+        self.discovery_status = "Disconnected".into();
         self.clear_input();
         self.serial_ready = false;
         self.image = None;
@@ -177,6 +230,7 @@ impl Viewer {
     }
 
     fn refresh_messages(&mut self) {
+        self.refresh_discovery();
         if self.disconnecting.is_some() { self.poll_disconnect(); return; }
         if let Some(camera) = &self.camera {
             while let Ok(msg) = camera.status.try_recv() { self.video_status = msg; }
@@ -260,10 +314,10 @@ impl Viewer {
                 ui.horizontal_wrapped(|ui| {
                     ui.strong("NanoKVM Rust");
                     let active = self.camera.is_some() || self.serial.is_some();
-                    if ui.add_enabled(!active && self.disconnecting.is_none(), egui::Button::new("Connect")).clicked() {
+                    if ui.add_enabled(!active && self.disconnecting.is_none() && self.discovery_rx.is_none(), egui::Button::new("Connect")).clicked() {
                         self.connect();
                     }
-                    if ui.add_enabled(active && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
+                    if ui.add_enabled((active || self.discovery_rx.is_some()) && self.disconnecting.is_none(), egui::Button::new("Disconnect")).clicked() {
                         self.disconnect();
                     }
                     ui.separator();
@@ -304,12 +358,20 @@ impl Viewer {
                     ui.separator();
                     ui.small(&self.serial_status);
                     ui.separator();
-                    ui.add_enabled_ui(self.camera.is_none() && self.serial.is_none(), |ui| {
-                        ui.label("Video:");
-                        ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.video_path));
-                        ui.label("Serial:");
-                        ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.serial_path));
+                    ui.add_enabled_ui(self.camera.is_none() && self.serial.is_none() && self.discovery_rx.is_none(), |ui| {
+                        if ui.checkbox(&mut self.automatic, "Automatic devices").changed() {
+                            if self.automatic { self.discover(false); }
+                            else { self.discovery_status = "Set both device paths manually".into(); }
+                        }
+                        if self.automatic && ui.button("Rescan").clicked() { self.discover(false); }
+                        ui.add_enabled_ui(!self.automatic, |ui| {
+                            ui.label("Video:");
+                            ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.video_path));
+                            ui.label("Serial:");
+                            ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut self.serial_path));
+                        });
                     });
+                    ui.small(&self.discovery_status);
                 });
             });
     }
@@ -437,7 +499,7 @@ impl Drop for Viewer {
 mod tests {
     use super::*;
     use crate::worker::Worker;
-    use crossbeam_channel::{bounded, Receiver, Sender};
+    use crossbeam_channel::Sender;
     use std::{io::{self, Write}, sync::{Mutex, atomic::Ordering}, thread};
 
     fn viewer() -> Viewer {
@@ -493,6 +555,63 @@ mod tests {
         let mut expected = protocol::encode(protocol::SEND_KEYBOARD, &[0; 8]).unwrap();
         expected.extend(protocol::encode(protocol::SEND_MOUSE_ABSOLUTE, &protocol::mouse_absolute(0, 0.5, 0.5, 0)).unwrap());
         assert_eq!(bytes, expected);
+    }
+
+    fn discovery_result(app: &mut Viewer, connect: bool, result: Result<DevicePair, String>) {
+        let (tx, rx) = bounded(1);
+        app.discovery_rx = Some(rx);
+        app.connect_after_discovery = connect;
+        tx.send(result).unwrap();
+    }
+
+    fn detected_pair() -> DevicePair {
+        DevicePair {
+            video: "/nonexistent-nanokvm-t06/video6".into(),
+            serial: "/nonexistent-nanokvm-t06/ttyUSB4".into(),
+        }
+    }
+
+    #[test]
+    fn discovery_alone_updates_paths_without_starting_workers() {
+        let mut app = Viewer::disconnected(Options { video: String::new(), serial: String::new() });
+        assert!(app.automatic);
+        discovery_result(&mut app, false, Ok(detected_pair()));
+        app.refresh_discovery();
+        assert!(app.camera.is_none() && app.serial.is_none());
+        assert!(app.video_path.ends_with("video6") && app.serial_path.ends_with("ttyUSB4"));
+        assert!(app.discovery_rx.is_none() && !app.connect_after_discovery);
+    }
+
+    #[test]
+    fn explicit_connect_uses_fresh_discovery_paths() {
+        let mut app = viewer();
+        app.automatic = true;
+        discovery_result(&mut app, true, Ok(detected_pair()));
+        app.refresh_discovery();
+        assert!(app.camera.is_some() && app.serial.is_some());
+        assert!(app.video_path.ends_with("video6") && app.serial_path.ends_with("ttyUSB4"));
+        wait_disconnected(&mut app);
+    }
+
+    #[test]
+    fn failed_discovery_clears_old_paths_and_keeps_devices_closed() {
+        let mut app = viewer();
+        assert!(!app.automatic);
+        discovery_result(&mut app, true, Err("Multiple NanoKVM candidates".into()));
+        app.refresh_discovery();
+        assert!(app.video_path.is_empty() && app.serial_path.is_empty());
+        assert!(app.camera.is_none() && app.serial.is_none());
+        assert!(app.discovery_status.contains("Multiple"));
+    }
+
+    #[test]
+    fn disconnect_cancels_a_pending_discovery_connection() {
+        let mut app = viewer();
+        discovery_result(&mut app, true, Ok(detected_pair()));
+        app.disconnect();
+        app.refresh_discovery();
+        assert!(app.discovery_rx.is_none() && !app.connect_after_discovery);
+        assert!(app.camera.is_none() && app.serial.is_none());
     }
 
     #[test]

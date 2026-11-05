@@ -59,6 +59,7 @@ During manual disconnect, a worker still running after two seconds remains track
 On app exit, the two-second deadline prevents an indefinite wait and reports unfinished cleanup to stderr.
 In that exceptional case, process termination reclaims resources; delivery of neutral reports is not guaranteed.
 
-T-06 still owns automatic device pairing. T-07 retains full unexpected-disconnection and recovery acceptance.
+T-06 subsequently adds automatic device pairing; see [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md).
+T-07 retains full unexpected-disconnection and recovery acceptance.
 T-05 introduces shared cleanup on worker termination to handle partial connections, but does not close those later tasks.
 Focus Mode, shortcut inhibition, and other input fixes remain in their existing tasks.
