@@ -1,9 +1,13 @@
-# T-14 integration verification
+# T-14 integration verification baseline
 
 Date: 2026-11-05 (Asia/Hong_Kong).
 Source baseline: `5abf129` (T-12). This revision changes documentation only.
 
-**Partial acceptance: T-14 remains open.** Existing regression checks pass, and operating documentation now matches current behavior.
+Subsequent scope update: the user prioritized software completion and deferred live hardware checks before approving T-15.
+[MODE-VERIFICATION.md](MODE-VERIFICATION.md) supersedes this baseline's missing-mode and inhibition statements.
+[TASKS.md](TASKS.md) supplies current delivery status. Results below describe the T-12 source baseline only.
+
+**Historical partial acceptance: T-14 remains open.** Existing regression checks pass, and operating documentation now matches current behavior.
 T-15 through T-18 remain unimplemented. T-13 is deferred at the user's request.
 Required live NanoKVM and Sway checks remain NOT RUN; software results do not replace those checks.
 Physical unplug/replug exercises remain waived under the revised T-04 scope.

@@ -1,7 +1,7 @@
 //! HID mapping for keyboard reports and absolute pointing in the video viewport.
 //! Note: egui's Linux modifiers do NOT contain physical Super/Meta events.
-//! F12 mapping and the on-screen Super toggle supply remote Meta; Sway physical-key capture requires
-//! `zwp_keyboard_shortcuts_inhibit_v1` on the same wl_surface as the viewer.
+//! F12 mapping and the on-screen Super toggle supply remote Meta.
+//! Focus Mode inhibits compositor shortcuts on the viewer surface; Meta still uses the mapped path.
 
 use eframe::egui;
 use crate::protocol::{modifiers, KeyboardReport};

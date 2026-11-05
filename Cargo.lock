@@ -1510,10 +1510,13 @@ dependencies = [
  "egui-winit",
  "image",
  "jpeg-decoder",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "serialport",
  "v4l",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

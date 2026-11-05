@@ -76,6 +76,8 @@ pub struct EventResponse {
 pub enum KeyboardInput {
     Key(egui::Event),
     Modifiers(egui::Modifiers),
+    RightControl(bool),
+    RightAlt(bool),
 }
 
 /// Drain the keyboard input published by `State::take_egui_input` for this frame.
@@ -764,6 +766,7 @@ impl State {
         } = event;
 
         let pressed = *state == winit::event::ElementState::Pressed;
+        self.on_release_modifier(*physical_key, pressed);
 
         let physical_key = if let winit::keyboard::PhysicalKey::Code(keycode) = *physical_key {
             key_from_key_code(keycode)
@@ -809,6 +812,15 @@ impl State {
                         .push(egui::Event::Text(text.to_string()));
                 }
             }
+        }
+    }
+
+    fn on_release_modifier(&mut self, key: winit::keyboard::PhysicalKey, pressed: bool) {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        match key {
+            PhysicalKey::Code(KeyCode::ControlRight) => self.keyboard_input.push(KeyboardInput::RightControl(pressed)),
+            PhysicalKey::Code(KeyCode::AltRight) => self.keyboard_input.push(KeyboardInput::RightAlt(pressed)),
+            _ => {}
         }
     }
 
@@ -1963,6 +1975,26 @@ mod keyboard_tests {
         state.egui_input.events.clear();
         state.on_key(egui::Key::V, Some(egui::Key::V), true);
         assert!(matches!(state.egui_input.events.as_slice(), [egui::Event::Paste(text)] if text == "local\ntext"));
+    }
+
+    #[test]
+    fn release_modifiers_keep_physical_sides_order_and_releases() {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        let ctx = egui::Context::default();
+        let mut state = State::new(ctx.clone(), ViewportId::ROOT, &NoDisplay, None, None, None);
+        for code in [KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::SuperRight] {
+            state.on_release_modifier(PhysicalKey::Code(code), true);
+        }
+        assert!(state.keyboard_input.is_empty());
+        for (code, pressed) in [(KeyCode::ControlRight, true), (KeyCode::AltRight, true),
+            (KeyCode::ControlRight, false), (KeyCode::AltRight, false)] {
+            state.on_release_modifier(PhysicalKey::Code(code), pressed);
+        }
+        state.publish_keyboard_input();
+        assert!(matches!(take_keyboard_input(&ctx, ViewportId::ROOT).as_slice(), [
+            KeyboardInput::RightControl(true), KeyboardInput::RightAlt(true),
+            KeyboardInput::RightControl(false), KeyboardInput::RightAlt(false),
+        ]));
     }
 
     #[test]

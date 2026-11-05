@@ -1,5 +1,7 @@
 use std::{path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use crate::shortcuts::{Shortcuts, Status as ShortcutStatus};
 use crate::worker::SHUTDOWN_TIMEOUT;
 use crate::discovery::{self, DevicePair};
 use crate::screenshot::{self, Format, Screenshot};
@@ -11,6 +13,9 @@ pub struct Options {
     pub video: String,
     pub serial: String,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputMode { NonFocus, Pending, Focus }
 
 pub struct Viewer {
     camera: Option<CameraHandle>,
@@ -36,6 +41,13 @@ pub struct Viewer {
     screenshot_buttons: [Option<egui::Id>; 2],
     screenshot_keeps_focus: bool,
     remote: bool,
+    mode: InputMode,
+    shortcuts: Option<Shortcuts>,
+    mode_status: String,
+    right_ctrl: bool,
+    right_alt: bool,
+    release_chord_held: bool,
+    input_blocked: bool,
     remote_super: bool,
     map_f12_to_meta: bool,
     mapped_meta_held: bool,
@@ -68,6 +80,14 @@ impl Viewer {
             rs.renderer.write().callback_resources.insert(renderer);
         }
         let mut app = Self::disconnected(opts);
+        let shortcuts = (|| {
+            // The Linux root window outlives Viewer; on_exit drops this before eframe destroys it.
+            unsafe { Shortcuts::new(cc.display_handle()?.as_raw(), cc.window_handle()?.as_raw()) }
+        })();
+        match shortcuts {
+            Ok(shortcuts) => app.shortcuts = Some(shortcuts),
+            Err(error) => app.mode_status = error.to_string(),
+        }
         app.restore_colors(config_path().as_deref());
         if app.automatic { app.discover(false); }
         app
@@ -98,6 +118,13 @@ impl Viewer {
             screenshot_buttons: [None; 2],
             screenshot_keeps_focus: false,
             remote: false,
+            mode: InputMode::NonFocus,
+            shortcuts: None,
+            mode_status: "Focus Mode unavailable without Wayland shortcut inhibition".into(),
+            right_ctrl: false,
+            right_alt: false,
+            release_chord_held: false,
+            input_blocked: false,
             remote_super: false,
             map_f12_to_meta: false,
             mapped_meta_held: false,
@@ -167,6 +194,11 @@ impl Viewer {
     }
 
     fn clear_input(&mut self) {
+        if let Some(shortcuts) = &mut self.shortcuts { shortcuts.release(); }
+        if self.mode != InputMode::NonFocus {
+            self.mode_status = "Non-Focus Mode: desktop shortcuts remain available".into();
+        }
+        self.mode = InputMode::NonFocus;
         self.remote = false;
         self.remote_super = false;
         self.mapped_meta_held = false;
@@ -410,11 +442,20 @@ impl Viewer {
                         self.disconnect();
                     }
                     ui.separator();
-                    if self.remote {
-                        if ui.button("■ Release input (Esc)").clicked() {
+                    let focus_available = self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked
+                        && self.shortcuts.as_ref().is_some_and(|s| s.status() == ShortcutStatus::Ready);
+                    if ui.add_enabled(focus_available, egui::Button::new("Focus Mode")).clicked() {
+                        self.request_focus_mode(ctx);
+                    }
+                    if ui.selectable_label(self.mode == InputMode::NonFocus, "Non-Focus Mode")
+                        .on_hover_text("Use normal video interaction with desktop shortcuts available.").clicked() {
+                        self.release_remote();
+                    }
+                    if self.remote || self.mode == InputMode::Pending {
+                        if ui.button("Release input (Right-Ctrl + Right-Alt)").clicked() {
                             self.release_remote();
                         }
-                    } else if ui.add_enabled(self.serial_ready && self.image.is_some(), egui::Button::new("▶ Capture input")).clicked() {
+                    } else if ui.add_enabled(self.serial_ready && self.image.is_some() && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked, egui::Button::new("▶ Capture input")).clicked() {
                         self.remote = true;
                         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
                     }
@@ -452,6 +493,7 @@ impl Viewer {
                     ui.separator();
                     ui.label(format!("{:.0} FPS", self.fps));
                 });
+                ui.small(&self.mode_status);
                 if !self.screenshot_status.is_empty() { ui.small(&self.screenshot_status); }
             });
         egui::TopBottomPanel::bottom("status")
@@ -502,7 +544,7 @@ impl Viewer {
             if self.remote && self.screenshot_keeps_focus { response.request_focus(); }
             let pressed = ctx.input(|i| i.events.iter().any(|event|
                 matches!(event, egui::Event::PointerButton { pressed: true, pos, .. } if rect.contains(*pos))));
-            if self.serial_ready && ctx.input(|i| i.focused) && pressed && (response.clicked() || response.is_pointer_button_down_on()) {
+            if self.serial_ready && self.mode != InputMode::Pending && !self.release_chord_held && !(self.right_ctrl && self.right_alt) && !self.input_blocked && ctx.input(|i| i.focused) && pressed && (response.clicked() || response.is_pointer_button_down_on()) {
                 self.remote = true;
                 response.request_focus();
             }
@@ -569,13 +611,59 @@ impl Viewer {
         self.next_mouse_update = now + Duration::from_millis(12);
     }
 
+    fn request_focus_mode(&mut self, ctx: &egui::Context) {
+        if !self.serial_ready || self.image.is_none() || self.release_chord_held || (self.right_ctrl && self.right_alt) { return; }
+        self.release_remote();
+        let result = self.shortcuts.as_mut().ok_or_else(|| anyhow::anyhow!(self.mode_status.clone()))
+            .and_then(Shortcuts::request);
+        match result {
+            Ok(()) => {
+                self.mode = InputMode::Pending;
+                self.mode_status = "Waiting for compositor to activate Focus Mode…".into();
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            }
+            Err(error) => {
+                self.release_remote();
+                self.mode_status = error.to_string();
+            }
+        }
+    }
+
+    fn refresh_shortcuts(&mut self, ctx: &egui::Context) {
+        if let Some(shortcuts) = &mut self.shortcuts {
+            let status = shortcuts.poll();
+            self.apply_shortcut_status(ctx, status);
+        }
+    }
+
+    fn apply_shortcut_status(&mut self, ctx: &egui::Context, status: ShortcutStatus) {
+        match status {
+            ShortcutStatus::Active if self.mode == InputMode::Pending => {
+                self.mode = InputMode::Focus;
+                self.remote = true;
+                self.mode_status = "Focus Mode: Right-Ctrl + Right-Alt releases input".into();
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            }
+            ShortcutStatus::Unavailable(error) => {
+                if self.mode != InputMode::NonFocus { self.release_remote(); }
+                self.mode_status = error;
+            }
+            ShortcutStatus::Discovering => self.mode_status = "Discovering Wayland shortcut support…".into(),
+            ShortcutStatus::Ready => self.mode_status = "Non-Focus Mode: desktop shortcuts remain available".into(),
+            _ => {}
+        }
+    }
+
+    fn consume_keyboard(input: &mut egui::RawInput) {
+        input.events.retain(|event| !matches!(event,
+            egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Copy |
+            egui::Event::Cut | egui::Event::Paste(_) | egui::Event::Ime(_)));
+        input.modifiers = egui::Modifiers::default();
+    }
+
     fn forward_key(&mut self, event: &egui::Event) {
         let egui::Event::Key { key, physical_key, pressed, modifiers, .. } = event else { return; };
         let key = physical_key.unwrap_or(*key);
-        if key == egui::Key::Escape && *pressed {
-            self.release_remote();
-            return;
-        }
         let before = self.keyboard.bytes();
         if self.map_f12_to_meta && key == egui::Key::F12 {
             self.mapped_meta_held = *pressed;
@@ -590,21 +678,50 @@ impl Viewer {
 impl eframe::App for Viewer {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.screenshot_keeps_focus = false;
+        self.input_blocked = false;
         let native = egui_winit::take_keyboard_input(ctx, input.viewport_id);
-        if !self.remote { return; }
         let video_id = egui::Id::new("video");
         if !input.focused || input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))) {
-            self.release_remote();
+            self.right_ctrl = false;
+            self.right_alt = false;
+            self.release_chord_held = false;
+            if self.remote || self.mode != InputMode::NonFocus { self.release_remote(); }
             ctx.memory_mut(|memory| memory.surrender_focus(video_id));
             return;
+        }
+        self.refresh_shortcuts(ctx);
+        let mut released = false;
+        for event in &native {
+            match event {
+                egui_winit::KeyboardInput::RightControl(pressed) => self.right_ctrl = *pressed,
+                egui_winit::KeyboardInput::RightAlt(pressed) => self.right_alt = *pressed,
+                _ => continue,
+            }
+            if self.right_ctrl && self.right_alt && (self.remote || self.mode != InputMode::NonFocus) {
+                self.release_chord_held = true;
+                self.release_remote();
+                released = true;
+                ctx.memory_mut(|memory| memory.surrender_focus(video_id));
+            }
+            if !self.right_ctrl && !self.right_alt { self.release_chord_held = false; }
         }
         let local_click = input.events.iter().any(|event| {
             matches!(event, egui::Event::PointerButton { pos, pressed: true, .. }
                 if !self.over_screenshot_button(ctx, *pos) && !ctx.read_response(video_id).is_some_and(|video|
                     video.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(video.layer_id)))
         });
-        if local_click { ctx.memory_mut(|memory| memory.surrender_focus(video_id)); }
+        if local_click {
+            ctx.memory_mut(|memory| memory.surrender_focus(video_id));
+            if self.mode != InputMode::NonFocus { self.release_remote(); }
+        }
+        if released || self.release_chord_held || self.mode == InputMode::Pending {
+            self.input_blocked = true;
+            Self::consume_keyboard(input);
+            return;
+        }
+        if !self.remote { return; }
         if !ctx.memory(|memory| memory.has_focus(video_id)) {
+            if self.mode == InputMode::Focus { self.release_remote(); }
             if self.keyboard.bytes() != [0; 8] || self.buttons != 0 {
                 self.release_held_input();
             }
@@ -622,6 +739,7 @@ impl eframe::App for Viewer {
                 if !self.remote { break; }
                 match event {
                     egui_winit::KeyboardInput::Key(event) => self.forward_key(&event),
+                    egui_winit::KeyboardInput::RightControl(_) | egui_winit::KeyboardInput::RightAlt(_) => {}
                     egui_winit::KeyboardInput::Modifiers(modifiers) => {
                         if input::sync_modifiers(&mut self.keyboard, modifiers, self.remote_super || self.mapped_meta_held) {
                             self.send_keyboard();
@@ -635,15 +753,17 @@ impl eframe::App for Viewer {
             self.send_keyboard();
         }
         // Remote keyboard events must not also activate or edit local widgets.
-        input.events.retain(|event| !matches!(event,
-            egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Copy |
-            egui::Event::Cut | egui::Event::Paste(_) | egui::Event::Ime(_)));
-        input.modifiers = egui::Modifiers::default();
+        Self::consume_keyboard(input);
+    }
+
+    fn on_exit(&mut self) {
+        self.release_remote();
+        self.shortcuts = None;
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh_messages();
-        if self.remote && !ctx.input(|i| i.focused) {
+        if (self.remote || self.mode != InputMode::NonFocus) && !ctx.input(|i| i.focused) {
             self.release_remote();
         }
         self.toolbar(ctx);
@@ -773,9 +893,17 @@ mod tests {
     fn screenshot_buttons_keep_remote_keyboard_ownership_for_both_formats() {
         let root = std::env::temp_dir().join(format!("nanokvm-screenshot-ui-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        for (remote, video_focus) in [(false, false), (true, false), (true, true)] {
+        for (remote, video_focus, focus_mode) in [(false, false, false), (true, false, false), (true, true, false), (true, true, true)] {
             for (index, extension) in [(0, "png"), (1, "webp")] {
+                let mut peer = crate::shortcuts::tests::Peer::new();
                 let (mut app, ctx, reports) = input_viewer();
+                if focus_mode {
+                    app.shortcuts = Some(peer.controller(true));
+                    app.request_focus_mode(&ctx);
+                    peer.activate(app.shortcuts.as_mut().unwrap());
+                    app.refresh_shortcuts(&ctx);
+                    reports.try_iter().for_each(drop);
+                }
                 app.remote = remote;
                 app.screenshot_directory = Some(root.clone());
                 app.colors = ColorSettings::SOFT_WHITE;
@@ -799,6 +927,7 @@ mod tests {
                     if video_focus { assert!(app.screenshot_keeps_focus, "lost ownership before egui: {index}, {pressed}"); }
                     let _ = ctx.run(input, |ctx| { app.toolbar(ctx); app.render_video(ctx); });
                     assert_eq!(app.remote, remote);
+                    assert_eq!(app.mode, if focus_mode { InputMode::Focus } else { InputMode::NonFocus });
                     if video_focus {
                         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("video"))),
                             "index={index}, pressed={pressed}, focus={:?}, button={:?}",
@@ -907,6 +1036,160 @@ mod tests {
     }
 
     #[test]
+    fn right_modifier_chord_releases_both_orders_and_requires_both_keys_up() {
+        use egui_winit::KeyboardInput::{RightControl, RightAlt, Modifiers};
+        for reverse in [false, true] {
+            let (mut app, ctx, reports) = input_viewer();
+            app.mode = InputMode::Focus;
+            hold_input(&mut app);
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("video")));
+            native_keyboard_frame(&mut app, &ctx, vec![Modifiers(egui::Modifiers::CTRL | egui::Modifiers::ALT)],
+                egui::RawInput { modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT, ..Default::default() });
+            assert_eq!(app.mode, InputMode::Focus, "aggregate/left modifiers cannot release");
+            reports.try_iter().for_each(drop);
+            native_keyboard_frame(&mut app, &ctx, vec![RightControl(true), RightControl(false), RightAlt(true), RightAlt(false)],
+                egui::RawInput::default());
+            assert_eq!(app.mode, InputMode::Focus, "a non-overlapping sequence cannot release");
+            reports.try_iter().for_each(drop);
+            native_keyboard_frame(&mut app, &ctx, vec![if reverse { RightAlt(true) } else { RightControl(true) }],
+                egui::RawInput::default());
+            assert_eq!(app.mode, InputMode::Focus);
+            reports.try_iter().for_each(drop);
+            native_keyboard_frame(&mut app, &ctx, vec![if reverse { RightControl(true) } else { RightAlt(true) }],
+                egui::RawInput { events: vec![key(egui::Key::A, true), egui::Event::Text("must not leak".into())], ..Default::default() });
+            assert_eq!(app.mode, InputMode::NonFocus);
+            assert!(!app.remote && app.release_chord_held && app.input_blocked);
+            assert_eq!(app.keyboard.bytes(), [0; 8]);
+            assert_eq!(app.buttons, 0);
+            assert!(!app.mapped_meta_held && !app.remote_super);
+            assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+            assert!(reports.is_empty());
+            native_keyboard_frame(&mut app, &ctx, vec![RightControl(false)], egui::RawInput::default());
+            assert!(app.release_chord_held);
+            native_keyboard_frame(&mut app, &ctx, vec![RightAlt(false)], egui::RawInput::default());
+            assert!(!app.release_chord_held && !app.remote);
+            assert!(reports.is_empty());
+        }
+    }
+
+    #[test]
+    fn focus_mode_waits_for_ack_and_all_exit_paths_destroy_inhibition() {
+        use crate::shortcuts::tests::Peer;
+        for exit in ["release", "local", "focus_loss", "disconnect", "video_failure", "serial_failure", "revoked", "exit", "drop"] {
+            let mut peer = Peer::new();
+            let (mut app, ctx, reports) = input_viewer();
+            app.shortcuts = Some(peer.controller(true));
+            app.request_focus_mode(&ctx);
+            assert_eq!(app.mode, InputMode::Pending);
+            assert!(!app.remote);
+            reports.try_iter().for_each(drop);
+            native_keyboard_frame(&mut app, &ctx, vec![egui_winit::KeyboardInput::Key(key(egui::Key::A, true))],
+                egui::RawInput::default());
+            assert!(reports.is_empty() && !app.remote);
+            let inhibitor = peer.activate(app.shortcuts.as_mut().unwrap());
+            app.raw_input_hook(&ctx, &mut egui::RawInput::default());
+            assert_eq!(app.mode, InputMode::Focus);
+            assert!(app.remote);
+            app.map_f12_to_meta = true;
+            input_frame(&mut app, &ctx, vec![key(egui::Key::F12, true), key(egui::Key::Escape, true)], &mut String::new());
+            assert!(app.remote && app.mapped_meta_held);
+            assert_eq!(app.keyboard.bytes(), [8, 0, 0x29, 0, 0, 0, 0, 0]);
+            reports.try_iter().for_each(drop);
+            match exit {
+                "release" => native_keyboard_frame(&mut app, &ctx, vec![
+                    egui_winit::KeyboardInput::RightControl(true), egui_winit::KeyboardInput::RightAlt(true),
+                ], egui::RawInput::default()),
+                "local" => input_frame(&mut app, &ctx, vec![pointer_button(egui::pos2(40.0, 10.0), true)], &mut String::new()),
+                "focus_loss" => input_frame(&mut app, &ctx, vec![egui::Event::WindowFocused(false)], &mut String::new()),
+                "disconnect" => app.disconnect(),
+                "video_failure" => { app.camera = Some(camera(true).0); wait_disconnected(&mut app); }
+                "serial_failure" => {
+                    app.serial.as_ref().unwrap().worker.stop();
+                    wait_disconnected(&mut app);
+                }
+                "revoked" => {
+                    peer.revoke(inhibitor, app.shortcuts.as_mut().unwrap());
+                    app.raw_input_hook(&ctx, &mut egui::RawInput::default());
+                }
+                "exit" => app.on_exit(),
+                "drop" => {
+                    drop(app);
+                    assert!(peer.requests().contains(&(inhibitor, 0, vec![])));
+                    continue;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(app.mode, InputMode::NonFocus, "{exit}");
+            assert!(!app.remote && !app.mapped_meta_held && !app.remote_super, "{exit}");
+            assert_eq!(app.keyboard.bytes(), [0; 8], "{exit}");
+            assert!(peer.requests().contains(&(inhibitor, 0, vec![])), "{exit}");
+        }
+    }
+
+    #[test]
+    fn toolbar_switches_modes_without_reusing_held_input() {
+        let mut peer = crate::shortcuts::tests::Peer::new();
+        let (mut app, ctx, reports) = input_viewer();
+        app.shortcuts = Some(peer.controller(true));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 700.0))),
+            ..Default::default()
+        };
+        for label in ["Focus Mode", "Non-Focus Mode"] {
+            let output = ctx.run(raw.clone(), |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+            let pos = output.shapes.iter().find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == label { return Some(text.pos + egui::vec2(3.0, 3.0)); }
+                }
+                None
+            }).expect("mode button label");
+            let mut input = egui::RawInput { events: vec![egui::Event::PointerMoved(pos),
+                pointer_button(pos, true), pointer_button(pos, false)], ..raw.clone() };
+            app.raw_input_hook(&ctx, &mut input);
+            let _ = ctx.run(input, |ctx| { app.toolbar(ctx); app.render_video(ctx); });
+            if label == "Focus Mode" {
+                assert_eq!(app.mode, InputMode::Pending);
+                peer.activate(app.shortcuts.as_mut().unwrap());
+                app.raw_input_hook(&ctx, &mut raw.clone());
+                assert_eq!(app.mode, InputMode::Focus);
+                hold_input(&mut app);
+                reports.try_iter().for_each(drop);
+            } else {
+                assert_eq!(app.mode, InputMode::NonFocus);
+                assert!(!app.remote && !app.remote_super && !app.mapped_meta_held);
+                assert_eq!(app.keyboard.bytes(), [0; 8]);
+                assert_eq!(app.buttons, 0);
+                assert!(peer.requests().iter().any(|(_, op, body)| *op == 0 && body.is_empty()));
+                assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_focus_can_be_cancelled_by_local_controls_or_disconnect() {
+        use crate::shortcuts::tests::Peer;
+        for local in [true, false] {
+            let mut peer = Peer::new();
+            let (mut app, ctx, reports) = input_viewer();
+            app.shortcuts = Some(peer.controller(true));
+            app.request_focus_mode(&ctx);
+            let requests = peer.requests();
+            let inhibitor = requests.iter().find(|(_, op, body)| *op == 1 && body.len() == 3).unwrap().2[0];
+            reports.try_iter().for_each(drop);
+            if local { input_frame(&mut app, &ctx, vec![pointer_button(egui::pos2(40.0, 10.0), true)], &mut String::new()); }
+            else { app.disconnect(); }
+            assert_eq!(app.mode, InputMode::NonFocus);
+            assert!(!app.remote);
+            assert!(peer.requests().contains(&(inhibitor, 0, vec![])));
+        }
+        let (mut app, ctx, _) = input_viewer();
+        app.request_focus_mode(&ctx);
+        assert_eq!(app.mode, InputMode::NonFocus);
+        assert!(!app.remote);
+        assert!(app.mode_status.contains("unavailable"));
+    }
+
+    #[test]
     fn f12_mapping_preserves_native_combo_order_and_normal_f12() {
         use egui_winit::KeyboardInput::{Key, Modifiers};
         let (mut app, ctx, reports) = input_viewer();
@@ -950,10 +1233,9 @@ mod tests {
     }
 
     #[test]
-    fn mapped_meta_releases_on_local_focus_escape_and_window_focus_loss() {
+    fn mapped_meta_releases_on_local_focus_and_window_focus_loss() {
         for events in [
             vec![pointer_button(egui::pos2(40.0, 10.0), true)],
-            vec![key(egui::Key::Escape, true)],
             vec![egui::Event::WindowFocused(false)],
         ] {
             let (mut app, ctx, reports) = input_viewer();
@@ -1128,8 +1410,8 @@ mod tests {
         assert!(matches!(reports.try_recv().unwrap(), Report::Keyboard(bytes) if bytes[2] == 5));
         assert!(reports.is_empty());
         input_frame(&mut app, &ctx, vec![key(egui::Key::Escape, true), egui::Event::Text("leak".into())], &mut local);
-        assert!(!app.remote && local == "a");
-        assert!(matches!(reports.try_recv().unwrap(), Report::Release(_)));
+        assert!(app.remote && local == "a");
+        assert!(matches!(reports.try_recv().unwrap(), Report::Keyboard(bytes) if bytes[3] == 0x29));
     }
 
     #[test]
@@ -1194,7 +1476,9 @@ mod tests {
         let (mut app, ctx, reports) = input_viewer();
         let inside = ctx.read_response(egui::Id::new("video")).unwrap().rect.center();
         input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside), pointer_button(inside, true)], &mut String::new());
-        input_frame(&mut app, &ctx, vec![key(egui::Key::Escape, true)], &mut String::new());
+        native_keyboard_frame(&mut app, &ctx, vec![
+            egui_winit::KeyboardInput::RightControl(true), egui_winit::KeyboardInput::RightAlt(true),
+        ], egui::RawInput::default());
         assert!(!app.remote);
         reports.try_iter().for_each(drop);
         input_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(inside), pointer_button(inside, false)], &mut String::new());

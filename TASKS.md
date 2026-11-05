@@ -1,12 +1,15 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 13.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 14.
 
-**18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**18 tasks: 11 delivered, 7 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision reconciles English operating documentation and records T-14 integration checks. All 56 app tests, including GPU rendering, and two backend tests pass. T-14 remains open for missing features and hardware acceptance; T-13 is deferred at the user's request.
+This revision delivers T-15 input modes, acknowledged Wayland shortcut inhibition, and the simultaneous right-side release chord.
+The user prioritized software completion and deferred live hardware checks before approving T-15.
+Delivered counts now describe software acceptance; deferred hardware checks are not claimed as passed.
+T-07 and T-10 integration gates are satisfied by the T-15 software evidence. T-13 remains deferred.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -27,33 +30,34 @@ Revision 10 adds optional F12-to-Meta forwarding, release checks, and a toolbar 
 Revision 11 verifies offscreen rendering on an RX 6600, validates presets, and reports persistence errors in the GPU panel.
 Revision 12 adds asynchronous full-video screenshots with exclusive file creation and retained keyboard ownership.
 Revision 13 adds the current acceptance matrix in [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md).
+Revision 14 records 62 passing app tests and three backend tests in [MODE-VERIFICATION.md](MODE-VERIFICATION.md).
+The unchanged GPU test remains explicitly ignored in this software-only pass.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
 | --- | --- | --- |
 | Native Rust UI with egui/eframe | `main.rs` starts eframe with wgpu; `app.rs` implements the viewer. Hardware acceptance remains open. | T-03, T-14 |
-| Full-screen screenshots, including during Focus Mode; WebP and PNG output | PNG and lossless WebP toolbar actions save native video frames before GPU tuning. Current capture ownership is preserved; explicit Focus Mode acceptance awaits T-15. | T-12, T-15 |
+| Full-screen screenshots, including during Focus Mode; WebP and PNG output | PNG and lossless WebP toolbar actions preserve ownership in both modes and save native frames before GPU tuning. Final toolbar integration awaits T-16. | T-12, T-15 |
 | Area screenshots; pause remote mouse forwarding; conditional resumption | No selection state or crop workflow exists. | T-18 |
 | Separate V4L2 and GPU panels; concurrent gamma controls; clear guidance | Only a GPU panel exists. `capture.rs` configures capture format but exposes no image controls. | T-11, T-17 |
 | GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | GPU rendering and validated preset persistence pass automated checks. Natural-color and combined-panel acceptance remain open. | T-11, T-17 |
 | Capture and release remote keyboard and mouse input | `remote` gates forwarding. Input release discards stale queued reports; shutdown attempts neutral reports directly. Failed device writes still cannot guarantee remote release. | T-05, T-08, T-09 |
-| Focus Mode captures keyboard input from Sway; local Right-Ctrl, Right-Alt release shortcut | No shortcut inhibition or right-side modifier tracking exists. Escape currently releases input. | T-15 |
-| Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Video clicks acquire input; local widgets retain keyboard ownership. Explicit Focus Mode and Non-Focus Mode toolbar actions remain absent. | T-09, T-15, T-16 |
+| Focus Mode captures keyboard input from Sway; local Right-Ctrl, Right-Alt release shortcut | Focus Mode waits for Wayland activation. Right-Ctrl + Right-Alt releases locally; Escape forwards. Software protocol and routing checks pass. | T-15 |
+| Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Toolbar actions select both modes. Non-Focus Mode uses video/local ownership; Focus Mode inhibits compositor shortcuts until release. | T-09, T-15, T-16 |
 | Microsoft Remote Desktop-style top toolbar; pin, auto-hide, narrow reveal strip | A fixed top panel exists. Pinning, auto-hide, and the reveal strip are absent. | T-16 |
-| Toolbar Disconnect and Fullscreen actions | Fullscreen, Connect, and Disconnect exist. Toolbar styling and modes remain open. | T-05, T-16 |
+| Toolbar Disconnect and Fullscreen actions | Fullscreen, Connect, and Disconnect exist. Final toolbar styling remains open. | T-05, T-16 |
 | Manual disconnect stops video and serial; clears input; attempts neutral reports before serial closes | Both workers have cancellation and completion tracking. Shutdown bypasses queued input and attempts both neutral reports. | T-05 |
-| Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Read/write errors, video wait timeout, and idle tty probe errors initiate shared cleanup. Software checks pass; Focus Mode inhibition integration remains under T-15. | T-07, T-15 |
-| Physical Meta forwarding or another key mapped to remote Meta | Optional F12-to-Meta mapping and the Super toggle supply remote Meta. Software checks pass; T-15 mode integration and Sway hardware acceptance remain open. | T-10, T-15 |
+| Unexpected V4L2 or serial disconnection clears resources and input; failed HID release does not block cleanup | Read/write errors, video wait timeout, and idle tty probe errors initiate shared cleanup. Software checks pass, including T-15 inhibition destruction on either worker ending. | T-07, T-15 |
+| Physical Meta forwarding or another key mapped to remote Meta | Optional F12 mapping and the Super toggle supply remote Meta. Mode exits clear both holds. Live hardware checks are deferred. | T-10, T-15 |
 
-Current behavior conflicts with DESIGN.md in these areas:
+Remaining implementation gaps against DESIGN.md:
 
-- Escape releases input instead of reaching the remote host; the required right-side release shortcut is absent.
-- Release input disables forwarding until a fresh video press or Capture input. Explicit Focus Mode and Non-Focus Mode remain absent.
-- GPU guidance now permits both gamma controls together; the separate V4L2 panel still awaits T-17.
-- T-07 verifies current input cleanup on unexpected disconnection. Focus Mode inhibition cleanup remains unverified until T-15 implements inhibition.
+- The final toolbar lacks pinning, auto-hide, and the reveal strip under T-16.
+- The separate V4L2 panel and combined device/GPU control checks remain under T-17.
+- Selected-area screenshots and conditional mouse resumption remain under T-18.
 
 SCOPE.md now distinguishes historical proposals from current decisions and DESIGN.md requirements.
-T-14 reconciles the operating documentation while retaining open implementation and hardware acceptance gates.
+T-14 retains the remaining software integration work. Hardware acceptance is tracked separately and deferred.
 
 ## Delivered artifacts
 
@@ -110,7 +114,7 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Result: [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) records 27 passing tests and the release build. Automatic mode scans at startup, Rescan, and Connect without automatic reconnection.
   - Limit: matching supports the T-04 VID/PID and hub-port profile only. Unknown topology and multiple candidates require manual paths; generic hardware with identical identities cannot be distinguished by inventory alone.
 
-- [ ] **T-07 — Clean up unexpected disconnections and support manual recovery**
+- [x] **T-07 — Clean up unexpected disconnections and support manual recovery**
   - Basis: DESIGN.md unexpected cleanup; supplementary S3. Depends on T-05; discovery is not a cleanup prerequisite.
   - Touchpoints: capture errors, serial errors, worker status delivery, `refresh_messages`, and shared disconnect handling.
   - Work: define detectable disconnection and stall conditions. Route failures through coordinated cleanup and report the cause.
@@ -120,7 +124,7 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Evidence: software failure checks cover either worker failing, release writes failing, and device loss while inputs remain held. Physical unplug exercises are not required.
   - Result: [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md#t-07-unexpected-disconnection-and-manual-recovery) records 31 passing tests. Linux pseudo-terminals verify idle serial hangup and manual reopening; injected video failure verifies cleanup after held input was transmitted.
   - Result: idle serial checks use the existing library's FIONREAD probe without sending input. Video errors include the 500 ms wait limit. Release failures retain their cause and do not prevent cleanup.
-  - Remaining: keep this task open until T-15 implements and verifies Focus Mode inhibition release through the shared cleanup path. Real V4L2 streaming and hardware HID delivery remain unverified.
+  - T-15 result: simulated Wayland tests verify inhibitor destruction after video or serial worker completion and manual cleanup. This closes software integration; real V4L2/HID checks remain deferred by the user.
 
 ## Keyboard, mouse, and modes
 
@@ -145,20 +149,24 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Scope order (2026-11-05): the user approved T-09 ahead of T-08. Input isolation is verified independently; keyboard mapping acceptance remains under T-08.
   - Result: [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md#t-09-input-ownership-and-focus-release) records 39 passing tests, including eight egui input checks. Video focus owns keyboard reports; local keyboard events remain local. Only video-owned button presses produce remote releases.
   - Result: single video presses acquire input. Local interaction releases held reports without moving the remote pointer. Focus loss clears capture, held keys, and buttons; a released drag cannot silently recapture input.
-  - Limit: T-15 must integrate explicit modes and Sway inhibition. T-18 must suspend forwarding during screenshot selection. Neither future feature is claimed by these software checks.
+  - Integration: T-15 subsequently verifies explicit modes and inhibition. T-18 still owns mouse suspension during area selection.
 
-- [ ] **T-15 — Implement Focus Mode, Non-Focus Mode, and local release**
+- [x] **T-15 — Implement Focus Mode, Non-Focus Mode, and local release**
   - Basis: DESIGN.md input modes and Sway keyboard capture. Depends on T-08 and T-09.
   - Touchpoints: `Viewer` mode state, native keyboard events, viewer-window shortcut inhibition, and release/cleanup paths.
   - Work: implement the required `Right-Ctrl, Right-Alt` local release shortcut with right-side key detection.
-  - Work: confirm whether the documented shortcut means a chord or sequence before implementing its gesture.
+  - Decision (2026-11-05): the user selected simultaneous Right-Ctrl + Right-Alt, in either press order.
   - Done: Focus Mode sends keyboard input to the remote host instead of activating Sway shortcuts.
   - Done: the reserved shortcut releases capture locally. Escape reaches the remote host as a normal key.
   - Done: Non-Focus Mode supports normal VNC-style video interaction while local desktop shortcuts remain available.
   - Done: mode exit, focus loss, disconnect, and shutdown release inhibition and held inputs. Toolbar actions remain usable during Focus Mode.
-  - Evidence: mode-transition checks and Sway hardware tests confirm shortcut capture, local release, and desktop recovery.
+  - Evidence: [MODE-VERIFICATION.md](MODE-VERIFICATION.md) records mode transitions, protocol activation/destruction, toolbar actions, and release checks. Live Sway checks are deferred by the user.
+  - Result: Focus Mode waits for compositor activation on the existing viewer surface. Non-Focus Mode retains normal video/local ownership. Unsupported, timed-out, or revoked inhibition never claims active capture.
+  - Result: right-side physical events trigger the local chord in either order. Escape forwards normally. Held F12/Meta, keys, and buttons clear on mode exits and cleanup.
+  - Result: focus loss, local controls, either worker ending, disconnect, and exit destroy inhibition. Screenshot buttons retain Focus Mode and held keyboard input in both formats.
+  - Limit: native Wayland support is required for Focus Mode. Compositor policy can retain emergency shortcuts. Live behavior is deferred, not verified.
 
-- [ ] **T-10 — Support a keyboard path to remote Meta**
+- [x] **T-10 — Support a keyboard path to remote Meta**
   - Basis: DESIGN.md permits physical Meta forwarding or another key mapped to remote Meta. Depends on T-15.
   - Touchpoints: native key handling, `sync_modifiers`, HID modifier bits, and mapping UI if the remapping option is chosen.
   - Work: implement one design-compliant keyboard path. The existing on-screen Super toggle alone does not satisfy this requirement.
@@ -168,7 +176,7 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Scope order (2026-11-05): the user approved T-10 before T-15. The mapping uses existing input ownership and cleanup; explicit mode acceptance remains pending.
   - Result: the toolbar's optional F12 → Meta checkbox maps held F12 to remote Left Meta. It defaults off and applies only while video owns keyboard input. The Super toggle remains an independent Meta source.
   - Result: [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md#t-10-optional-f12-to-meta-mapping) records 47 passing app tests, including four new mapping checks. Local focus, Escape, window focus loss, mapping changes, disconnect, and worker failure clear mapped state.
-  - Remaining: keep this task open until T-15 verifies mode exits and the reserved right-side release gesture. Sway/NanoKVM hardware tests must verify combinations, release, and desktop recovery. No physical Meta capture is required by the selected mapping path.
+  - T-15 result: mode exits, the right-side release chord, and cleanup clear mapped Meta and the Super toggle. Software acceptance is complete; live Sway/NanoKVM delivery remains deferred. The selected mapping path does not require physical Meta capture.
 
 ## Toolbar
 
@@ -204,7 +212,7 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Result: [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) records 52 passing tests, including actual RX 6600 pixel readback for sRGB/non-sRGB targets, all five controls, Soft white, texture resize, and Reset.
   - Result: preset values must be finite and within UI ranges. Atomic replacement preserves the existing file on validation or write failure. Missing/invalid/unreadable presets use defaults with a dedicated status; saves report success or the error.
   - Result: every GPU control has guidance. The panel explains device processing before GPU processing and allows both gamma controls together.
-  - Remaining: keep this task open until T-17 verifies independent device/GPU controls and hardware reference images establish natural-color acceptance. Offscreen GPU checks do not verify the NanoKVM capture path or monitor calibration.
+  - Remaining: T-17 must verify independent device/GPU control integration. Natural-color hardware acceptance is deferred; offscreen GPU checks do not verify capture-device or monitor calibration.
 
 ## Screenshots
 
@@ -221,7 +229,7 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Decision (2026-11-05): the user accepted PNG as the primary choice, lossless WebP, and unique files under HOME/Pictures/NanoKVM.
   - Result: separate toolbar actions snapshot the current frame and save through one background worker. Missing frames, missing HOME, encoding errors, write failures, and filename collisions report status without overwriting files.
   - Result: [SCREENSHOT-VERIFICATION.md](SCREENSHOT-VERIFICATION.md) records decoded pixel/dimension checks and real egui clicks with capture enabled, disabled, and local keyboard ownership. Screenshot clicks preserve held remote keyboard input and do not forward pointer events.
-  - Remaining: keep this task open until T-15/T-16 verify both explicit modes and the final toolbar. Live NanoKVM/compositor acceptance remains unverified; area selection belongs to T-18.
+  - T-15 result: both formats pass button, pixel, and ownership checks in Focus Mode and Non-Focus Mode. T-16 final toolbar integration remains open. Live acceptance is deferred; area selection belongs to T-18.
 
 - [ ] **T-18 — Capture a user-selected area with safe mouse forwarding**
   - Basis: DESIGN.md partial capture and conditional input resumption. Depends on T-09, T-12, and T-15.
@@ -250,13 +258,13 @@ T-14 reconciles the operating documentation while retaining open implementation 
   - Touchpoints: the integrated viewer, regression checks, hardware evidence, README.md, SCOPE.md, and TASKS.md.
   - Work: verify discovery, Connect, both input modes, the release shortcut, Meta, toolbar behavior, both color panels, and screenshots.
   - Work: verify manual disconnect, either device failing, bounded release attempts, shutdown, and manual reconnection.
-  - Done: each requirement has acceptance evidence. Required hardware checks have no unresolved FAIL or NOT RUN result.
+  - Done: each software requirement has acceptance evidence and no unresolved software FAIL result. Track deferred hardware checks separately.
   - Done: operating documentation uses English and matches actual behavior, terminology, capture choices, and limitations.
   - Done: reconcile historical SCOPE.md assumptions and approval wording. Do not modify AGENTS.md or DESIGN.md.
   - Evidence: retain commands, environment, results, and remaining limitations. Reuse unaffected checks instead of repeating them unnecessarily.
   - Result: [INTEGRATION-VERIFICATION.md](INTEGRATION-VERIFICATION.md) maps every design requirement and supplementary scope to evidence and remaining checks. The release build, 56 app tests including GPU rendering, and two backend tests pass.
   - Result: README.md and SCOPE.md now use English and match current controls, screenshot choices, limitations, and historical evidence. AGENTS.md and DESIGN.md remain unchanged.
-  - Remaining: T-15 through T-18 require implementation; T-07/T-10/T-11/T-12 retain integration gates. Live NanoKVM/Sway and natural-color checks remain NOT RUN. T-13 remains deferred. Do not mark T-14 complete.
+  - Remaining: T-16 through T-18 require implementation and final software integration. T-11/T-12 retain dependent integration gates. Live checks and T-13 remain deferred; T-14 stays open.
 
 ## Progress and maintenance
 
@@ -264,18 +272,18 @@ T-14 reconciles the operating documentation while retaining open implementation 
 | --- | --- | --- | --- |
 | Initial artifacts | T-01, T-02 | 2 | 0 |
 | Build and device evidence | T-03, T-04 | 2 | 0 |
-| Connection and cleanup | T-05, T-06, T-07 | 2 | 1 |
-| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 2 | 2 |
+| Connection and cleanup | T-05, T-06, T-07 | 3 | 0 |
+| Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 4 | 0 |
 | Toolbar | T-16 | 0 | 1 |
 | Color controls | T-17, T-11 | 0 | 2 |
 | Screenshots | T-12, T-18 | 0 | 2 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 8 | 10 |
+| Total | T-01–T-18 | 11 | 7 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.
 - Update the date, counts, and evidence whenever a checkbox changes.
-- Mark unavailable hardware checks NOT RUN and leave dependent acceptance tasks open.
+- Mark deferred hardware checks NOT RUN. Under the user's software-first scope, software delivery does not claim hardware acceptance.
 - Existing source alone does not prove release-build, rendering, Sway, or NanoKVM acceptance.
 - Propose affected callers, tests, fixtures, configuration, and validation before seeking code approval under AGENTS.md.
 - This checklist does not authorize code changes or expand scope beyond its stated requirements.

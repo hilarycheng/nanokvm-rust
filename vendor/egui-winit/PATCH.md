@@ -18,3 +18,12 @@ Only src/lib.rs differs from upstream source. The manifest selects MIT and inclu
 The new direct dependency uses the existing resolved crate, without additional third-party packages.
 Keep this patch pinned until upstream exposes pre-translation keyboard input through eframe.
 Recheck the patch and its tests before upgrading egui/eframe.
+
+## T-15 right-side release keys
+
+The native batch also carries physical Right-Control and Right-Alt presses/releases, before egui key translation.
+Left modifiers and unrelated physical keys do not produce these events.
+The existing synthetic-press filter remains in place. Window focus loss resets tracking in the viewer.
+The viewer reserves the simultaneous right-side chord for local release; aggregate modifiers alone cannot trigger it.
+Three backend tests cover clipboard preservation, batch publication, and side-specific release events.
+Wayland inhibition lives in src/shortcuts.rs in the application, not this backend patch.

@@ -2,10 +2,11 @@
 
 A native Linux NanoKVM USB viewer built with Rust, egui/eframe, and wgpu.
 It provides MJPEG video, serial keyboard/mouse forwarding, GPU color controls, and full-video screenshots.
-Integration acceptance remains open; see [the acceptance record](INTEGRATION-VERIFICATION.md) and [task status](TASKS.md).
+Software integration acceptance remains open; see [mode verification](MODE-VERIFICATION.md) and [task status](TASKS.md).
+Live hardware acceptance is deferred at the user's request.
 
 The intended environment is Ubuntu with Sway → NanoKVM USB → Arch Linux with GNOME.
-Physical Meta capture, explicit input modes, the final toolbar, V4L2 image controls, and area screenshots remain pending.
+Focus Mode and Non-Focus Mode are available. The final toolbar, V4L2 image controls, and area screenshots remain pending.
 Lower RAM usage than the original application has not been measured. T-13 is deferred at the user's request.
 
 ## Build and start
@@ -57,10 +58,24 @@ Keyboard reports follow video focus. Clicking local controls releases held remot
 Pointer presses belong to video only when they start there. Releasing a video drag outside releases its remote button.
 Window focus loss clears input capture and held state.
 
-With video keyboard focus, Escape releases input. Release input also ends forwarding while keeping the devices connected.
-Click video or select Capture input to resume. Escape forwarding and the Right-Ctrl, Right-Alt release shortcut await T-15.
-Explicit Focus Mode, Non-Focus Mode, and Sway shortcut inhibition are not implemented.
-Host shortcuts can therefore intercept keys intended for the remote machine.
+Non-Focus Mode uses normal video/local input ownership and leaves desktop shortcuts available.
+Click video or select Capture input to forward input without inhibiting desktop shortcuts.
+
+Select Focus Mode to request Wayland shortcut inhibition for the viewer window.
+The app waits for compositor acknowledgement before forwarding in Focus Mode. It reports unavailable or rejected requests.
+Focus Mode requires a native Wayland window and compositor support; it is unavailable under X11/XWayland.
+The compositor can retain emergency shortcuts or reject inhibition through its policy.
+
+Hold Right-Ctrl + Right-Alt together, in either order, to release input and return to Non-Focus Mode.
+Release both keys before capturing again. Left-side Ctrl/Alt combinations do not trigger this shortcut.
+The first modifier can reach the remote host before the chord completes; release then requests neutral reports.
+Escape forwards as a normal remote key in both modes.
+
+Release input and the Non-Focus Mode button also clear held input while keeping devices connected.
+Click video to resume normal forwarding; select Focus Mode explicitly to inhibit shortcuts again.
+Local controls leave Focus Mode and release held input. Screenshot actions preserve Focus Mode and keyboard ownership.
+Focus loss, disconnect, worker failure, and exit release inhibition. Compositor revocation also returns to Non-Focus Mode.
+After a protocol failure or revocation, restart the viewer before requesting Focus Mode again; Non-Focus Mode remains available.
 
 Enable F12 → Meta to use held F12 as remote Meta while video has keyboard focus.
 Release F12 to release its Meta hold. The Super toggle independently controls a Meta hold.
@@ -70,7 +85,7 @@ Release input, focus loss, and disconnect clear that toggle and mapped holds.
 F12 mapping defaults off. Disable it to send ordinary F12; changing the mapping releases held remote input.
 The mapping preference lasts for the application session, including disconnect/reconnect.
 Ctrl+C/V/X, physical-key mapping, modifier ordering, and local input isolation have software regression coverage.
-Sway and NanoKVM HID delivery remain unverified.
+Simulated Wayland protocol tests cover inhibition and cleanup. Live Sway/NanoKVM acceptance remains deferred.
 
 Fullscreen and Windowed change the viewer window. The current fixed toolbar has no pinning or auto-hide.
 Opening Color releases input capture. Resume explicitly when finished adjusting colors.
@@ -89,7 +104,8 @@ Disconnect does not change an already requested snapshot.
 
 App exit requests cancellation within the shared shutdown deadline.
 Forced termination during a write can leave a partial new image; existing images remain protected.
-Area capture is not implemented. Explicit mode and final toolbar acceptance await T-15, T-16, and T-18.
+Both formats have software checks in Focus Mode and Non-Focus Mode. Final toolbar integration remains under T-16.
+Area capture is not implemented and remains under T-18.
 
 ## GPU color controls
 
@@ -120,7 +136,7 @@ Natural-color acceptance still needs NanoKVM reference images and combined V4L2/
 | Video or serial stops | Read the status, resolve the device problem, and reconnect manually after cleanup. |
 | Video wait timeout | A frame wait exceeding 500 ms ends the stream; the viewer does not retry that stream automatically. |
 | Connect stays disabled | Wait for both workers to stop. A driver that ignores timeouts may delay closure. |
-| Remote input does not arrive | Confirm video focus and capture state; Sway may intercept shortcuts until T-15. |
+| Remote input does not arrive | Confirm video focus and mode status. Non-Focus Mode leaves desktop shortcuts available. |
 | Screenshot or preset fails | Read the displayed cause and check the destination permissions and absolute HOME/XDG paths. |
 
 Run the application and patched input-backend tests:
@@ -133,7 +149,8 @@ cargo test --release --locked --all-targets -- --include-ignored --nocapture
 env -u DISPLAY -u WAYLAND_DISPLAY cargo test --release --locked -p egui-winit --lib
 ```
 
-The [integration record](INTEGRATION-VERIFICATION.md) maps every design requirement to evidence and remaining acceptance.
+The [T-14 baseline](INTEGRATION-VERIFICATION.md) maps design requirements to the earlier integration evidence.
+[Mode verification](MODE-VERIFICATION.md) records subsequent T-15 behavior and software checks.
 It distinguishes automated checks from NanoKVM and Sway hardware checks.
 Recheck the pinned egui-winit patch before upgrading egui/eframe.
 [Scope](SCOPE.md) preserves the original requirements and audit findings with their current status.
@@ -153,6 +170,7 @@ Recheck the pinned egui-winit patch before upgrading egui/eframe.
 | [protocol.rs](src/protocol.rs) | Serial framing and HID reports |
 | [serial.rs](src/serial.rs) | Serial worker and report queue |
 | [worker.rs](src/worker.rs) | Shared cancellation and completion tracking |
+| [shortcuts.rs](src/shortcuts.rs) | Window-scoped Wayland shortcut inhibition and acknowledgement |
 | [vendor/egui-winit](vendor/egui-winit) | Native keyboard events before local clipboard translation |
 
 ## Protocol reference and license

@@ -7,6 +7,7 @@ mod protocol;
 mod serial;
 mod screenshot;
 mod worker;
+mod shortcuts;
 
 fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
