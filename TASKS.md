@@ -1,12 +1,12 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 10.
+Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 11.
 
 **18 tasks: 8 delivered, 10 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision adds the T-10 F12-to-Meta mapping and software checks. T-10 stays open for T-15 mode integration and Sway hardware acceptance. T-07 also awaits T-15.
+This revision validates T-11 GPU rendering and makes preset persistence safe and visible. T-11 remains open for T-17 combined-panel and natural-color acceptance. T-07 and T-10 still await T-15 integration.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
 New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
@@ -24,6 +24,7 @@ Revision 7 verifies unexpected cleanup, idle tty hangup, and manual serial recov
 Revision 8 verifies video keyboard ownership, local controls, pointer release, and focus loss through egui regression checks.
 Revision 9 preserves keyboard input before clipboard translation and verifies physical keys and modifier ordering.
 Revision 10 adds optional F12-to-Meta forwarding, release checks, and a toolbar mapping control.
+Revision 11 verifies offscreen rendering on an RX 6600, validates presets, and reports persistence errors in the GPU panel.
 Historical test results in SCOPE.md remain historical evidence.
 
 | Requirement | Current source | Tasks |
@@ -32,7 +33,7 @@ Historical test results in SCOPE.md remain historical evidence.
 | Full-screen screenshots, including during Focus Mode; WebP and PNG output | No screenshot action, encoder, or export path exists. | T-12 |
 | Area screenshots; pause remote mouse forwarding; conditional resumption | No selection state or crop workflow exists. | T-18 |
 | Separate V4L2 and GPU panels; concurrent gamma controls; clear guidance | Only a GPU panel exists. `capture.rs` configures capture format but exposes no image controls. | T-11, T-17 |
-| GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | Controls, shader uniforms, preset saving, and startup loading exist. Rendering and persistence need acceptance. | T-11 |
+| GPU Gamma, Highlights, Saturation, and saved presets through wgpu/WGSL | GPU rendering and validated preset persistence pass automated checks. Natural-color and combined-panel acceptance remain open. | T-11, T-17 |
 | Capture and release remote keyboard and mouse input | `remote` gates forwarding. Input release discards stale queued reports; shutdown attempts neutral reports directly. Failed device writes still cannot guarantee remote release. | T-05, T-08, T-09 |
 | Focus Mode captures keyboard input from Sway; local Right-Ctrl, Right-Alt release shortcut | No shortcut inhibition or right-side modifier tracking exists. Escape currently releases input. | T-15 |
 | Toolbar switches Focus Mode and Non-Focus Mode; normal VNC-style input outside Focus Mode | Video clicks acquire input; local widgets retain keyboard ownership. Explicit Focus Mode and Non-Focus Mode toolbar actions remain absent. | T-09, T-15, T-16 |
@@ -46,7 +47,7 @@ Current behavior conflicts with DESIGN.md in these areas:
 
 - Escape releases input instead of reaching the remote host; the required right-side release shortcut is absent.
 - Release input disables forwarding until a fresh video press or Capture input. Explicit Focus Mode and Non-Focus Mode remain absent.
-- The GPU panel advises GPU-only tuning; DESIGN.md permits V4L2 gamma and GPU gamma together.
+- GPU guidance now permits both gamma controls together; the separate V4L2 panel still awaits T-17.
 - T-07 verifies current input cleanup on unexpected disconnection. Focus Mode inhibition cleanup remains unverified until T-15 implements inhibition.
 
 SCOPE.md predates these requirements. Its screenshot-format questions, input terminology, and physical-Meta-only target do not override DESIGN.md.
@@ -197,6 +198,11 @@ T-14 reconciles the remaining documentation after implementation.
   - Done: saving and restoring GPU presets preserves valid values. Missing, invalid, or unwritable presets produce safe, understandable behavior.
   - Evidence: persistence checks, shader validation, and actual GPU rendering verify adjustments and reset behavior.
   - Evidence: use hardware reference images for natural-color acceptance. Contrast, Temperature/Tint, and comparison views are not automatic additions.
+  - Approval (2026-11-05): the user approved T-11 implementation and the final commit.
+  - Result: [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) records 52 passing tests, including actual RX 6600 pixel readback for sRGB/non-sRGB targets, all five controls, Soft white, texture resize, and Reset.
+  - Result: preset values must be finite and within UI ranges. Atomic replacement preserves the existing file on validation or write failure. Missing/invalid/unreadable presets use defaults with a dedicated status; saves report success or the error.
+  - Result: every GPU control has guidance. The panel explains device processing before GPU processing and allows both gamma controls together.
+  - Remaining: keep this task open until T-17 verifies independent device/GPU controls and hardware reference images establish natural-color acceptance. Offscreen GPU checks do not verify the NanoKVM capture path or monitor calibration.
 
 ## Screenshots
 

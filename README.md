@@ -69,7 +69,16 @@ Color 面板只調整遠端影像。Save preset 儲存至：
 - `$XDG_CONFIG_HOME/nanokvm-rust/colors.json`；或
 - `~/.config/nanokvm-rust/colors.json`。
 
-Gamma 等 controls 已有實作，但實際自然度仍需用使用者嘅硬件及參考畫面驗收。Contrast、Temperature／Tint 同原圖對比目前未實作，亦未定為必須新增功能。
+Hover over each GPU control for its effect. GPU adjustments follow V4L2 device processing; both gamma controls can be active together.
+The separate V4L2 panel remains pending. Reset 1:1 resets GPU adjustments only; Soft white sets white peak to 0.84.
+Neither button changes the saved preset until Save preset is selected.
+
+Startup restores finite preset values within the control ranges. Missing, invalid, or unreadable presets use GPU defaults with a status message.
+Save preset writes a complete temporary file before replacing the saved preset. Failures preserve the previous preset and show their cause.
+Empty or relative XDG_CONFIG_HOME values fall back to an absolute HOME; unavailable configuration paths are reported.
+
+RX 6600 offscreen rendering verifies the GPU controls and Reset. Natural-color acceptance still needs NanoKVM hardware reference images.
+Contrast, Temperature/Tint, and comparison views remain outside this task.
 
 ## 已知限制
 
@@ -98,6 +107,7 @@ cargo test --all-targets
 Cargo.lock records the dependency resolution. See [LIFECYCLE-VERIFICATION.md](LIFECYCLE-VERIFICATION.md) for T-05, T-07, and T-09 software checks and limits.
 See [DISCOVERY-VERIFICATION.md](DISCOVERY-VERIFICATION.md) for T-06 matching rules, software checks, and supported hardware limits.
 See [KEYBOARD-VERIFICATION.md](KEYBOARD-VERIFICATION.md) for T-08/T-10 checks, mapping limits, and the native input patch.
+See [COLOR-VERIFICATION.md](COLOR-VERIFICATION.md) for current T-11 GPU rendering, preset checks, and remaining acceptance.
 
 ## Source 分工
 

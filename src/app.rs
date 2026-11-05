@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
 use crate::worker::SHUTDOWN_TIMEOUT;
 use crate::discovery::{self, DevicePair};
@@ -27,6 +27,7 @@ pub struct Viewer {
     image: Option<Arc<RgbaFrame>>,
     new_frame: Option<Arc<RgbaFrame>>,
     colors: ColorSettings,
+    color_status: String,
     colors_open: bool,
     remote: bool,
     remote_super: bool,
@@ -45,24 +46,23 @@ pub struct Viewer {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))?;
+    config_path_from(std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from), std::env::var_os("HOME").map(PathBuf::from))
+}
+
+fn config_path_from(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    let root = xdg.filter(|path| path.is_absolute())
+        .or_else(|| home.filter(|path| path.is_absolute()).map(|path| path.join(".config")))?;
     Some(root.join("nanokvm-rust").join("colors.json"))
 }
 
 impl Viewer {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: Options) -> Self {
-        let colors = config_path()
-            .and_then(|p| fs::read(p).ok())
-            .and_then(|s| serde_json::from_slice(&s).ok())
-            .unwrap_or_default();
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
             let renderer = GpuVideo::new(&rs.device, rs.target_format);
             rs.renderer.write().callback_resources.insert(renderer);
         }
         let mut app = Self::disconnected(opts);
-        app.colors = colors;
+        app.restore_colors(config_path().as_deref());
         if app.automatic { app.discover(false); }
         app
     }
@@ -84,6 +84,7 @@ impl Viewer {
             image: None,
             new_frame: None,
             colors: ColorSettings::default(),
+            color_status: "Using GPU defaults".into(),
             colors_open: false,
             remote: false,
             remote_super: false,
@@ -277,17 +278,30 @@ impl Viewer {
         }
     }
 
-    fn save_colors(&mut self) {
-        let Some(path) = config_path() else {
-            self.video_status = "HOME/XDG_CONFIG_HOME unavailable".to_owned();
+    fn restore_colors(&mut self, path: Option<&Path>) {
+        self.colors = ColorSettings::default();
+        self.color_status = match path {
+            None => "Using GPU defaults: no absolute HOME or XDG_CONFIG_HOME".into(),
+            Some(path) => match ColorSettings::load(path) {
+                Ok(Some(colors)) => {
+                    self.colors = colors;
+                    format!("GPU preset loaded: {}", path.display())
+                }
+                Ok(None) => "No saved GPU preset; using defaults".into(),
+                Err(error) => format!("Using GPU defaults: {error:#}"),
+            },
+        };
+    }
+
+    fn save_colors(&mut self, path: Option<&Path>) {
+        let Some(path) = path else {
+            self.color_status = "Cannot save: no absolute HOME or XDG_CONFIG_HOME".into();
             return;
         };
-        let success = path.parent()
-            .map(|p| fs::create_dir_all(p))
-            .and_then(|r| r.ok())
-            .and_then(|_| serde_json::to_vec_pretty(&self.colors).ok())
-            .and_then(|data| fs::write(&path, data).ok());
-        self.video_status = (if success.is_some() { "Color preset saved" } else { "Could not save preset" }).to_owned();
+        self.color_status = match self.colors.save(path) {
+            Ok(()) => format!("GPU preset saved: {}", path.display()),
+            Err(error) => format!("Could not save GPU preset: {error:#}"),
+        };
     }
 
     fn color_panel(&mut self, ctx: &egui::Context) {
@@ -296,30 +310,42 @@ impl Viewer {
             .resizable(false)
             .default_width(270.0)
             .show(ctx, |ui| {
-                ui.heading("GPU Color Tuning");
-                ui.label("Only the remote video is affected.");
-                ui.add_space(8.0);
-                ui.add(egui::Slider::new(&mut self.colors.white, 0.55..=1.0)
-                    .text("White peak").fixed_decimals(2));
-                ui.add(egui::Slider::new(&mut self.colors.highlights, 0.0..=1.0)
-                    .text("Highlights").fixed_decimals(2));
-                ui.add(egui::Slider::new(&mut self.colors.gamma, 0.60..=1.60)
-                    .text("Gamma").fixed_decimals(2));
-                ui.add(egui::Slider::new(&mut self.colors.exposure, -2.0..=2.0)
-                    .text("Exposure (EV)").fixed_decimals(2));
-                ui.add(egui::Slider::new(&mut self.colors.saturation, 0.0..=1.5)
-                    .text("Saturation").fixed_decimals(2));
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Reset 1:1").clicked() { self.colors = ColorSettings::default(); }
-                    if ui.button("Soft white").clicked() {
-                        self.colors = ColorSettings { white: 0.84, ..Default::default() };
-                    }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("GPU Color Tuning");
+                    ui.label("Only the remote video is affected.");
+                    ui.add_space(8.0);
+                    ui.add(egui::Slider::new(&mut self.colors.white, ColorSettings::WHITE)
+                        .text("White peak").fixed_decimals(2))
+                        .on_hover_text("Lower values dim the video, including peak white. 1.00 leaves white unchanged.");
+                    ui.add(egui::Slider::new(&mut self.colors.highlights, ColorSettings::HIGHLIGHTS)
+                        .text("Highlights").fixed_decimals(2))
+                        .on_hover_text("Higher values compress bright tones. 0.00 disables compression; clipped capture detail cannot be recovered.");
+                    ui.add(egui::Slider::new(&mut self.colors.gamma, ColorSettings::GAMMA)
+                        .text("Gamma").fixed_decimals(2))
+                        .on_hover_text("Below 1.00 brightens midtones; above 1.00 darkens them. This applies after device gamma.");
+                    ui.add(egui::Slider::new(&mut self.colors.exposure, ColorSettings::EXPOSURE)
+                        .text("Exposure (EV)").fixed_decimals(2))
+                        .on_hover_text("Adjust linear-light brightness. +1 EV doubles it; -1 EV halves it. Bright values can clip.");
+                    ui.add(egui::Slider::new(&mut self.colors.saturation, ColorSettings::SATURATION)
+                        .text("Saturation").fixed_decimals(2))
+                        .on_hover_text("0.00 gives grayscale, 1.00 preserves color, and higher values boost color intensity.");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset 1:1").on_hover_text("Reset GPU adjustments only. Device controls and the saved preset stay unchanged.").clicked() {
+                            self.colors = ColorSettings::default();
+                            self.color_status = "GPU defaults applied; use Save preset to keep them".into();
+                        }
+                        if ui.button("Soft white").clicked() {
+                            self.colors = ColorSettings::SOFT_WHITE;
+                            self.color_status = "Soft white applied; use Save preset to keep it".into();
+                        }
+                    });
+                    if ui.button("Save preset").clicked() { self.save_colors(config_path().as_deref()); }
+                    ui.small(&self.color_status);
+                    ui.add_space(10.0);
+                    ui.label("GPU adjustments apply after V4L2 device controls. Both gamma controls can be used together.");
+                    ui.small("Device controls are not available in this panel. GPU presets do not change device settings or desktop colors.");
                 });
-                if ui.button("Save preset").clicked() { self.save_colors(); }
-                ui.add_space(10.0);
-                ui.label("Capture V4L2 at accurate baseline; tone-map only in GPU.");
-                ui.small("Sway physical Super key interception is not yet implemented.");
             });
     }
 
@@ -594,6 +620,80 @@ mod tests {
             video: "/nonexistent-nanokvm-t05/video".into(),
             serial: "/nonexistent-nanokvm-t05/serial".into(),
         })
+    }
+
+    #[test]
+    fn preset_paths_ignore_empty_and_relative_environment_values() {
+        let home = Some(PathBuf::from("/home/test"));
+        let fallback = Some(PathBuf::from("/home/test/.config/nanokvm-rust/colors.json"));
+        assert_eq!(config_path_from(Some(PathBuf::from("/config")), home.clone()), Some(PathBuf::from("/config/nanokvm-rust/colors.json")));
+        for xdg in [None, Some(PathBuf::new()), Some(PathBuf::from("relative"))] {
+            assert_eq!(config_path_from(xdg, home.clone()), fallback);
+        }
+        assert_eq!(config_path_from(None, Some(PathBuf::from("relative"))), None);
+        assert_eq!(config_path_from(None, None), None);
+    }
+
+    #[test]
+    fn preset_status_reports_load_save_and_failures_without_hiding_video_status() {
+        let root = std::env::temp_dir().join(format!("nanokvm-color-status-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path = root.join("colors.json");
+        let mut app = viewer();
+        app.video_status = "Video connected".into();
+        app.restore_colors(None);
+        assert!(app.color_status.contains("no absolute HOME"));
+        app.restore_colors(Some(&path));
+        assert_eq!(app.colors, ColorSettings::default());
+        assert!(app.color_status.contains("No saved GPU preset"));
+        app.colors = ColorSettings::SOFT_WHITE;
+        app.save_colors(Some(&path));
+        assert!(app.color_status.contains("GPU preset saved"));
+        app.colors = ColorSettings::default();
+        app.restore_colors(Some(&path));
+        assert_eq!(app.colors, ColorSettings::SOFT_WHITE);
+        assert!(app.color_status.contains("GPU preset loaded"));
+        app.save_colors(None);
+        assert!(app.color_status.contains("Cannot save"));
+        assert_eq!(app.colors, ColorSettings::SOFT_WHITE);
+        std::fs::write(&path, b"invalid preset").unwrap();
+        app.restore_colors(Some(&path));
+        assert_eq!(app.colors, ColorSettings::default());
+        assert!(app.color_status.contains("Using GPU defaults: Invalid GPU preset JSON"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"invalid preset");
+        app.save_colors(Some(&path.join("child.json")));
+        assert!(app.color_status.contains("Could not save GPU preset"));
+        app.restore_colors(Some(&root));
+        assert!(app.color_status.contains("Read GPU preset"));
+        assert_eq!(app.video_status, "Video connected");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn color_buttons_apply_soft_white_and_reset_gpu_controls() {
+        let mut app = viewer();
+        app.colors_open = true;
+        let ctx = egui::Context::default();
+        for (label, expected) in [("Soft white", ColorSettings::SOFT_WHITE), ("Reset 1:1", ColorSettings::default())] {
+            app.colors = ColorSettings { exposure: 1.0, gamma: 1.3, highlights: 0.5, white: 0.7, saturation: 0.3 };
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 800.0))),
+                ..Default::default()
+            };
+            let output = ctx.run(raw.clone(), |ctx| app.color_panel(ctx));
+            let pos = output.shapes.iter().find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == label { return Some(text.pos + egui::vec2(3.0, 3.0)); }
+                }
+                None
+            }).expect("color preset button");
+            let raw = egui::RawInput { events: vec![
+                egui::Event::PointerMoved(pos), pointer_button(pos, true), pointer_button(pos, false),
+            ], ..raw };
+            let _ = ctx.run(raw, |ctx| app.color_panel(ctx));
+            assert_eq!(app.colors, expected);
+            assert!(app.color_status.contains("use Save preset"));
+        }
     }
 
     fn input_frame(app: &mut Viewer, ctx: &egui::Context, events: Vec<egui::Event>, local_text: &mut String) {
