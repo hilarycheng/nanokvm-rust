@@ -1,8 +1,10 @@
 use std::{path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 use eframe::egui;
+use anyhow::Context;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::shortcuts::{Shortcuts, Status as ShortcutStatus};
 use crate::worker::SHUTDOWN_TIMEOUT;
+use crate::calibration::{self, Correction};
 use crate::controls::{ImageControl, Request as ControlRequest};
 use crate::discovery::{self, DevicePair};
 use crate::screenshot::{self, Format, Screenshot, Region};
@@ -45,6 +47,12 @@ pub struct Viewer {
     colors: ColorSettings,
     color_status: String,
     colors_open: bool,
+    calibration: calibration::Settings,
+    calibration_job: Option<calibration::Job>,
+    calibration_path: Option<PathBuf>,
+    calibration_status: String,
+    calibration_enabled: bool,
+    calibration_cancelled: bool,
     device_controls: Vec<ImageControl>,
     device_control_status: String,
     device_control_pending: bool,
@@ -115,6 +123,19 @@ impl Viewer {
         }
         app.connect();
         app.restore_colors(config_path().as_deref());
+        app.calibration_path = config_path().map(|p| p.with_file_name("calibration.json"));
+        if let Some(path) = &app.calibration_path {
+            match calibration::Settings::load(path) {
+                Ok(settings) => {
+                    if let Some(manual) = settings.manual {
+                        app.colors = manual;
+                        app.calibration_enabled = settings.enabled;
+                    }
+                    app.calibration = settings;
+                }
+                Err(error) => app.calibration_status = format!("Could not load calibration: {error:#}"),
+            }
+        }
         app
     }
 
@@ -139,6 +160,12 @@ impl Viewer {
             colors: ColorSettings::default(),
             color_status: "Using GPU defaults".into(),
             colors_open: false,
+            calibration: calibration::Settings::default(),
+            calibration_job: None,
+            calibration_path: None,
+            calibration_status: "Enter an SSH host or alias with key/agent login to a logged-in GNOME desktop.".into(),
+            calibration_enabled: true,
+            calibration_cancelled: false,
             device_controls: Vec::new(),
             device_control_status: "Connect video to inspect device controls".into(),
             device_control_pending: false,
@@ -281,6 +308,7 @@ impl Viewer {
     }
 
     fn disconnect(&mut self) {
+        self.cancel_calibration();
         self.discovery_rx = None;
         self.candidates.clear();
         self.pending_selection = None;
@@ -376,7 +404,7 @@ impl Viewer {
     fn refresh_messages(&mut self) {
         self.refresh_screenshot();
         self.refresh_discovery();
-        if self.disconnecting.is_some() { self.poll_disconnect(); return; }
+        if self.disconnecting.is_some() { self.refresh_calibration(); self.poll_disconnect(); return; }
         if let Some(camera) = &self.camera {
             while let Ok(msg) = camera.status.try_recv() { self.video_status = msg; }
             while let Ok(update) = camera.controls.try_recv() {
@@ -393,6 +421,7 @@ impl Viewer {
                 }
             }
             while let Ok(img) = camera.frames.try_recv() {
+                if let Some(job) = &self.calibration_job { let _ = job.frames.try_send(img.clone()); }
                 self.image = Some(img.clone());
                 if self.selection.is_none() { self.new_frame = Some(img); }
                 self.frames_seen += 1;
@@ -413,6 +442,7 @@ impl Viewer {
             self.poll_disconnect();
             return;
         }
+        self.refresh_calibration();
         let elapsed = self.fps_clock.elapsed();
         if elapsed >= Duration::from_millis(1000) {
             self.fps = self.fps_frames as f32 / elapsed.as_secs_f32();
@@ -422,7 +452,7 @@ impl Viewer {
     }
 
     fn take_screenshot(&mut self, format: Format) {
-        if self.screenshot.is_some() || self.selection.is_some() { return; }
+        if self.screenshot.is_some() || self.selection.is_some() || self.calibration_job.is_some() { return; }
         let Some(frame) = self.image.clone() else {
             self.screenshot_status = "Screenshot unavailable: no video frame".into();
             return;
@@ -458,7 +488,7 @@ impl Viewer {
     }
 
     fn start_area(&mut self, format: Format) {
-        if self.screenshot.is_some() || self.selection.is_some() { return; }
+        if self.screenshot.is_some() || self.selection.is_some() || self.calibration_job.is_some() { return; }
         let Some(frame) = self.image.clone() else { self.screenshot_status = "Screenshot unavailable: no video frame".into(); return; };
         self.buttons = 0;
         self.pointer_pos = None;
@@ -532,7 +562,14 @@ impl Viewer {
             self.report_error(self.color_status.clone());
             return;
         };
-        self.color_status = match self.colors.save(path) {
+        let path = if self.calibration.manual.is_some() { path.with_file_name("calibration.json") } else { path.to_path_buf() };
+        let result = if self.calibration.manual.is_some() {
+            let mut settings = self.calibration.clone();
+            settings.manual = Some(self.colors);
+            settings.enabled = self.calibration_enabled;
+            settings.save(&path).map(|_| { self.calibration = settings; })
+        } else { self.colors.save(&path) };
+        self.color_status = match result {
             Ok(()) => format!("GPU preset saved: {}", path.display()),
             Err(error) => {
                 self.report_error(format!("Could not save GPU preset: {error:#}"));
@@ -548,7 +585,7 @@ impl Viewer {
             .default_width(270.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.group(|ui| {
+                    ui.add_enabled_ui(self.calibration_job.is_none(), |ui| { ui.group(|ui| {
                         ui.heading("GPU Color Tuning");
                         ui.label("Only the remote video is affected.");
                         ui.add_space(8.0);
@@ -571,6 +608,7 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             if ui.button("Reset 1:1").on_hover_text("Reset GPU adjustments only. Device controls and the saved preset stay unchanged.").clicked() {
                                 self.colors = ColorSettings::default();
+                                self.calibration_enabled = false;
                                 self.color_status = "GPU defaults applied; use Save preset to keep them".into();
                             }
                             if ui.button("Soft white").clicked() {
@@ -583,15 +621,130 @@ impl Viewer {
                         ui.add_space(10.0);
                         ui.label("GPU adjustments apply after V4L2 device controls. Both gamma controls can be used together.");
                         ui.small("GPU presets do not change device settings or desktop colors.");
-                    });
+                    }); });
                     ui.add_space(8.0);
                     ui.group(|ui| self.device_color_panel(ui));
+                    ui.add_space(8.0);
+                    ui.collapsing("Auto calibration", |ui| self.calibration_panel(ui));
                 });
             });
     }
 
+    fn calibration_controls(&self) -> Vec<(u32, i64)> {
+        let mut values: Vec<_> = self.device_controls.iter().filter_map(|c| c.value.map(|v| (c.description.id, v))).collect();
+        values.sort_unstable();
+        values
+    }
+
+    fn saved_calibration_matches(&self, saved: &calibration::Saved) -> bool {
+        saved.profile == self.calibration.profile && saved.video == self.video_path
+            && self.image.as_ref().is_some_and(|f| (f.width, f.height) == (saved.width, saved.height))
+            && saved.controls == self.calibration_controls()
+    }
+
+    fn active_correction(&self) -> Correction {
+        self.calibration.saved.as_ref().filter(|s| self.calibration_enabled && self.saved_calibration_matches(s))
+            .map(|s| s.correction).unwrap_or_default()
+    }
+
+    fn cancel_calibration(&mut self) {
+        if let Some(job) = &self.calibration_job {
+            self.calibration_cancelled = true;
+            job.worker.stop();
+            self.calibration_status = "Cancelling calibration and closing its remote test window…".into();
+        }
+    }
+
+    fn start_calibration(&mut self) {
+        if self.calibration_job.is_some() || self.selection.is_some() || self.screenshot.is_some()
+            || self.disconnecting.is_some() || self.camera.is_none() || self.device_control_pending { return; }
+        self.calibration.profile.host = self.calibration.profile.host.trim().to_owned();
+        let result = (|| -> anyhow::Result<calibration::Job> {
+            let frame = self.image.as_ref().ok_or_else(|| anyhow::anyhow!("Connect video before calibration"))?;
+            let path = self.calibration_path.as_ref().ok_or_else(|| anyhow::anyhow!("No configuration directory for the calibration profile"))?;
+            for control in &self.device_controls {
+                let automatic = match control.description.id {
+                    0x0098090c | 0x00980912 | 0x00980919 => control.value.is_some_and(|v| v != 0),
+                    0x009a0901 => control.value.is_some_and(|v| v != 1),
+                    _ => false,
+                };
+                anyhow::ensure!(!automatic, "Disable {} in V4L2 controls before calibration", control.description.name);
+            }
+            self.calibration.save(path)?;
+            calibration::spawn(self.calibration.profile.clone(), self.video_path.clone(), frame.width, frame.height,
+                self.calibration_controls(), self.active_correction())
+        })();
+        match result {
+            Ok(job) => {
+                self.release_remote();
+                self.input_blocked = true;
+                self.calibration_cancelled = false;
+                self.calibration_job = Some(job);
+                self.calibration_status = "Starting calibration…".into();
+            }
+            Err(error) => self.calibration_status = format!("Could not start: {error:#}"),
+        }
+    }
+
+    fn refresh_calibration(&mut self) {
+        let Some(job) = &mut self.calibration_job else { return; };
+        while let Ok(message) = job.messages.try_recv() {
+            if !self.calibration_cancelled { self.calibration_status = message; }
+        }
+        let Some(result) = job.worker.finish() else { return; };
+        let job = self.calibration_job.take().unwrap();
+        if self.calibration_cancelled {
+            self.calibration_status = "Calibration cancelled; previous correction kept.".into();
+            return;
+        }
+        let result = (|| -> anyhow::Result<()> {
+            result.map_err(anyhow::Error::msg)?;
+            let saved = job.result.try_recv().context("Calibration returned no result")?;
+            anyhow::ensure!(self.saved_calibration_matches(&saved) && self.disconnecting.is_none(), "Calibration context changed; result discarded");
+            let path = self.calibration_path.as_ref().ok_or_else(|| anyhow::anyhow!("No calibration profile path"))?;
+            let mut next = self.calibration.clone();
+            let status = format!("Validated RGB RMSE: {:.2} → {:.2} /255. Profile saved and applied.", saved.before, saved.after);
+            next.saved = Some(saved);
+            next.manual = Some(ColorSettings::default());
+            next.enabled = true;
+            next.save(path)?;
+            self.calibration = next;
+            self.calibration_enabled = true;
+            self.colors = ColorSettings::default();
+            self.color_status = "Neutral manual controls saved with the calibrated profile.".into();
+            self.calibration_status = status;
+            Ok(())
+        })();
+        if let Err(error) = result { self.calibration_status = format!("{error:#}. Previous correction kept."); }
+    }
+
+    fn calibration_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label("One-click SDR/sRGB calibration using a generated reference chart.");
+        ui.small("Remote GNOME must be logged in as the SSH user. Use fixed color settings; disable HDR, Night Light and automatic device controls.");
+        ui.add_enabled_ui(self.calibration_job.is_none(), |ui| {
+            ui.label("SSH host");
+            ui.add(egui::TextEdit::singleline(&mut self.calibration.profile.host)
+                .hint_text("user@host or SSH alias").desired_width(f32::INFINITY));
+            ui.small("Remote Arch tools:");
+            ui.code("sudo pacman -S --needed openssh mpv");
+            ui.small("Use an existing SSH config alias or user@host with key/agent login. The desktop and NanoKVM output are detected automatically.");
+            let matches = self.calibration.saved.as_ref().is_some_and(|s| self.saved_calibration_matches(s));
+            ui.add_enabled(matches, egui::Checkbox::new(&mut self.calibration_enabled, "Use saved calibration"));
+            if self.calibration.saved.is_some() && !matches { ui.small("Saved correction does not match this profile, video size or device controls. Recalibrate."); }
+            let ready = self.image.is_some() && self.camera.is_some() && self.disconnecting.is_none()
+                && !self.device_control_pending && self.selection.is_none() && self.screenshot.is_none();
+            if ui.add_enabled(ready, egui::Button::new("Auto calibrate")).clicked() { self.start_calibration(); }
+        });
+        if self.calibration_job.is_some() {
+            ui.spinner();
+            if ui.button("Cancel calibration").clicked() { self.cancel_calibration(); }
+        }
+        ui.label(&self.calibration_status);
+        ui.small("Calibration affects video display. Exports retain the decoded capture pixels. Changing the remote display settings requires recalibration.");
+    }
+
     fn request_device_control(&mut self, request: ControlRequest) {
-        if self.device_control_pending || self.disconnecting.is_some() { return; }
+        if self.device_control_pending || self.disconnecting.is_some() || self.calibration_job.is_some() { return; }
         match self.camera.as_ref().map(|camera| camera.control_requests.try_send(request)) {
             Some(Ok(())) => { self.device_control_pending = true; self.device_control_status = "Waiting for device…".into(); }
             _ => {
@@ -605,7 +758,7 @@ impl Viewer {
         ui.heading("V4L2 Device Controls");
         ui.label("Device processing affects captured video and screenshots before GPU adjustments.");
         ui.small("Device gamma and GPU gamma can both remain active. GPU Reset and presets affect only the GPU panel.");
-        let enabled = self.camera.is_some() && self.disconnecting.is_none() && !self.device_control_pending;
+        let enabled = self.camera.is_some() && self.disconnecting.is_none() && !self.device_control_pending && self.calibration_job.is_none();
         if ui.add_enabled(enabled, egui::Button::new("Refresh device controls")).clicked() {
             self.request_device_control(ControlRequest::Refresh);
         }
@@ -772,7 +925,7 @@ impl Viewer {
                             menu.response.on_hover_text(format!("{mode}\n{}", self.mode_status));
                             ui.separator();
                             for (index, format, icon, label) in [(0, Format::Png, "📷", "Save PNG"), (1, Format::WebP, "🖼", "Save WebP")] {
-                                let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none(), egui::Button::new(icon))
+                                let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.selection.is_none() && self.calibration_job.is_none(), egui::Button::new(icon))
                                     .on_hover_text(format!("{label}\nSave the complete video at native resolution, before GPU tuning. WebP is lossless."));
                                 response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label));
                                 self.screenshot_buttons[index] = Some(response.id);
@@ -785,7 +938,7 @@ impl Viewer {
                                 if response.clicked() { self.finish_area(); self.screenshot_status = "Area selection cancelled".into(); }
                             } else {
                                 for (index, format, icon, label) in [(0, Format::Png, "✂", "Area PNG"), (1, Format::WebP, "⊞", "Area WebP")] {
-                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none(), egui::Button::new(icon))
+                                    let response = ui.add_enabled(self.image.is_some() && self.screenshot.is_none() && self.calibration_job.is_none(), egui::Button::new(icon))
                                         .on_hover_text(format!("{label}\nSelect part of a frozen video frame. Remote mouse pauses until capture finishes."));
                                     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label));
                                     self.area_buttons[index] = Some(response.id);
@@ -882,6 +1035,7 @@ impl Viewer {
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
                 VideoCallback {
+                    correction: self.active_correction(),
                     frame: self.new_frame.take(),
                     settings: self.colors,
                 },
@@ -955,6 +1109,7 @@ impl Viewer {
     }
 
     fn handle_mouse_events(&mut self, ctx: &egui::Context, video: &egui::Response, events: &[egui::Event], native: bool) {
+        if self.calibration_job.is_some() { return; }
         let video_rect = video.rect;
         let now = Instant::now();
         let toolbar_rect = self.toolbar_rect;
@@ -1108,6 +1263,11 @@ impl eframe::App for Viewer {
         self.pointer_forwarded = false;
         let native = egui_winit::take_keyboard_input(ctx, input.viewport_id);
         let video_id = egui::Id::new("video");
+        if self.calibration_job.is_some() {
+            self.input_blocked = true;
+            ctx.memory_mut(|memory| memory.surrender_focus(video_id));
+            return;
+        }
         if !input.focused || input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))) {
             self.right_ctrl = false;
             self.right_alt = false;
@@ -1234,6 +1394,9 @@ impl Drop for Viewer {
         if let Some(job) = &mut self.screenshot {
             if let Err(err) = job.worker.wait_until(deadline) { eprintln!("Screenshot: {err}"); }
         }
+        if let Some(job) = &mut self.calibration_job {
+            if let Err(err) = job.worker.wait_until(deadline) { eprintln!("Calibration: {err}"); }
+        }
     }
 }
 
@@ -1325,6 +1488,92 @@ mod tests {
             assert_eq!(app.colors, expected);
             assert!(app.color_status.contains("use Save preset"));
         }
+    }
+
+    fn completed_calibration(app: &mut Viewer) {
+        let (done, result) = bounded(1);
+        let mut correction = Correction::default();
+        correction.matrix[0][0] = 0.9;
+        let frame = app.image.as_ref().unwrap();
+        done.send(calibration::Saved { profile: app.calibration.profile.clone(), video: app.video_path.clone(),
+            width: frame.width, height: frame.height, controls: app.calibration_controls(), correction, before: 10.0, after: 1.0 }).unwrap();
+        let worker = Worker::spawn(|_| Ok(()));
+        while !worker.is_finished() { thread::yield_now(); }
+        app.calibration_job = Some(calibration::Job { frames: bounded(1).0, messages: bounded(1).1, result, worker });
+    }
+
+    #[test]
+    fn calibration_result_saves_before_applying_and_rejects_cancelled_or_changed_context() {
+        let root = std::env::temp_dir().join(format!("nanokvm-calibration-ui-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        for action in ["success", "cancel", "disconnect", "resize", "controls", "save_failure"] {
+            let mut app = viewer();
+            app.image = Some(Arc::new(RgbaFrame { width: 320, height: 240, rgba: vec![128; 320 * 240 * 4] }));
+            app.calibration.profile = calibration::Profile { host: "desktop".into() };
+            let path = root.join(format!("{action}.json"));
+            app.calibration_path = Some(path.clone());
+            app.calibration.save(&path).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            app.colors = ColorSettings::SOFT_WHITE;
+            completed_calibration(&mut app);
+            match action {
+                "cancel" => app.cancel_calibration(),
+                "disconnect" => app.disconnect(),
+                "resize" => app.image = None,
+                "controls" => app.device_controls.push(ImageControl { description: crate::controls::tests::gamma(), value: Some(3), unavailable: None }),
+                "save_failure" => app.calibration_path = Some(path.join("invalid.json")),
+                _ => {},
+            }
+            app.refresh_calibration();
+            assert!(app.calibration_job.is_none());
+            if action == "success" {
+                assert_eq!(app.colors, ColorSettings::default());
+                assert_ne!(app.active_correction(), Correction::default());
+                let restored = calibration::Settings::load(&path).unwrap();
+                assert_eq!(restored.saved.unwrap().correction, app.active_correction());
+                assert_eq!(restored.manual, Some(ColorSettings::default()));
+                app.calibration_enabled = false;
+                assert_eq!(app.active_correction(), Correction::default());
+                app.calibration_path = Some(root.join("calibration.json"));
+                app.colors = ColorSettings::SOFT_WHITE;
+                app.save_colors(Some(&root.join("colors.json")));
+                let restored = calibration::Settings::load(&root.join("calibration.json")).unwrap();
+                assert!(!restored.enabled);
+                assert_eq!(restored.manual, Some(ColorSettings::SOFT_WHITE));
+            } else {
+                assert!(app.calibration.saved.is_none());
+                assert_eq!(app.colors, ColorSettings::SOFT_WHITE);
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calibration_keeps_keyboard_mouse_and_screenshot_actions_local() {
+        let (mut app, ctx, reports) = input_viewer();
+        app.release_remote();
+        reports.try_iter().for_each(drop);
+        app.calibration_job = Some(calibration::Job {
+            frames: bounded(1).0, messages: bounded(1).1, result: bounded(1).1,
+            worker: Worker::spawn(|stop| { while !stop.load(std::sync::atomic::Ordering::Acquire) { thread::sleep(Duration::from_millis(1)); } Ok(()) }),
+        });
+        let mut raw = egui::RawInput { focused: true, events: vec![key(egui::Key::A, true)], ..Default::default() };
+        app.raw_input_hook(&ctx, &mut raw);
+        assert!(app.input_blocked && !app.remote);
+        app.take_screenshot(Format::Png);
+        app.start_area(Format::Png);
+        assert!(app.screenshot.is_none() && app.selection.is_none());
+        assert!(reports.is_empty());
+        app.cancel_calibration();
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while !app.calibration_job.as_ref().unwrap().worker.is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        app.refresh_calibration();
+        assert!(app.calibration_job.is_none());
     }
 
     fn wait_screenshot(app: &mut Viewer) {

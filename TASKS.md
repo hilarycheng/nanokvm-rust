@@ -1,19 +1,21 @@
 # Tasks
 
-Updated: 2026-11-05 (Asia/Hong_Kong). Revision: 16.
+Updated: 2026-11-06 (Asia/Hong_Kong). Revision: 18.
 
-**18 tasks: 16 delivered, 2 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
+**19 tasks: 17 delivered, 2 open.** Each task has one checkbox. Counts do not represent effort or feature completion percentages.
 
 [DESIGN.md](DESIGN.md) defines the design requirements. Current source determines implementation status.
 [AGENTS.md](AGENTS.md) defines project rules. Code changes require a proposal and explicit `APPROVED`.
-This revision completes T-16/T-17/T-18 and T-11's combined-panel software acceptance.
+Revision 16 completed T-16/T-17/T-18 and T-11's combined-panel software acceptance.
 Device controls and selected-area PNG/WebP exports are integrated with both input modes.
-The user approved T-16 through T-21; this repository defines no T-19, T-20, or T-21.
-No requirements or completion claims are invented for those undefined IDs.
+At revision 16, T-19 through T-21 were undefined despite the earlier approval range.
+Revision 17 defines T-19 from the separately proposed and approved automatic calibration workflow.
+Revision 18 simplifies T-19 to one SSH host/config alias with automatic desktop and output discovery.
+T-20 and T-21 remain undefined; no requirements or completion claims are invented for them.
 Delivered counts describe software acceptance. Live hardware checks and T-13 remain deferred by the user.
 
 Existing IDs `T01` through `T14` become `T-01` through `T-14`, with their original purpose retained.
-New tasks use `T-15` through `T-18`. Tasks appear in workstream order, not numerical order.
+New tasks use `T-15` through `T-19`. Tasks appear in workstream order, not numerical order.
 [SCOPE.md](SCOPE.md) supplies historical S1–S7 requirements and F1–F8 findings.
 Startup disconnection, automatic device pairing, RAM comparison, and build delivery remain supplementary work from that scope.
 They are not additional requirements attributed to DESIGN.md.
@@ -253,6 +255,15 @@ SCOPE.md distinguishes historical proposals from current decisions and DESIGN.md
 
 ## Measurement and final acceptance
 
+- [x] **T-19 — Add profile-based automatic color calibration**
+  - Basis: the user's 2026-11-06 proposal and approval. The user selected the generated original chart as the reference.
+  - Touchpoints: calibration profile/worker, color UI, GPU uniforms/WGSL, preset persistence, cleanup and documentation.
+  - Result: one configured SSH profile displays a generated chart with remote mpv, samples stable NanoKVM frames, validates gray/RGB correction and saves it before applying.
+  - Follow-up: the user configures only an SSH host or alias. The app detects the GNOME session and tries active outputs until NanoKVM confirms its chart.
+  - Result: cancellation, timeouts, failed validation, changed context and write errors retain previous correction. Old color presets remain compatible.
+  - Evidence: [CALIBRATION-VERIFICATION.md](CALIBRATION-VERIFICATION.md) records 99 passing checks, including GPU rendering, desktop discovery and simulated SSH/player cleanup.
+  - Limit: live GNOME/SSH/NanoKVM calibration and measured MJPG color improvement remain NOT RUN. No remote credentials were supplied.
+
 - [ ] **T-13 — Measure and reduce RAM use**
   - Basis: supplementary S7. Baselines can start after T-03 and T-04, before optimization.
   - Touchpoints: complete process-tree measurements, frame buffers, capture queues, and measured allocation hotspots.
@@ -286,9 +297,10 @@ SCOPE.md distinguishes historical proposals from current decisions and DESIGN.md
 | Keyboard, mouse, and modes | T-08, T-09, T-15, T-10 | 4 | 0 |
 | Toolbar | T-16 | 1 | 0 |
 | Color controls | T-17, T-11 | 2 | 0 |
+| Automatic color calibration | T-19 | 1 | 0 |
 | Screenshots | T-12, T-18 | 2 | 0 |
 | Measurement and final acceptance | T-13, T-14 | 0 | 2 |
-| Total | T-01–T-18 | 16 | 2 |
+| Total | T-01–T-19 | 17 | 2 |
 
 - Keep one checkbox per task and preserve IDs when updating descriptions or ordering.
 - Check a task only when its stated completion criteria and evidence are satisfied.

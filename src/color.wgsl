@@ -4,8 +4,10 @@
 struct ColorControls {
     // Exposure in stops; midtone gamma; highlight compression; white peak (sRGB)
     p0: vec4<f32>,
-    // saturation; target_format_is_srgb; spare; spare
+    // saturation; target_format_is_srgb; calibration_enabled; spare
     p1: vec4<f32>,
+    matrix: array<vec4<f32>, 3>,
+    knots: array<vec4<f32>, 17>,
 };
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -40,10 +42,27 @@ fn srgb_encode_channel(x: f32) -> f32 {
     return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
 }
 
+fn calibrated_channel(value: f32, channel: u32) -> f32 {
+    for (var i = 1u; i < 17u; i = i + 1u) {
+        let a = ctl.knots[i - 1u];
+        let b = ctl.knots[i];
+        if (value <= b[channel]) {
+            let t = clamp((value - a[channel]) / max(b[channel] - a[channel], 0.000001), 0.0, 1.0);
+            return mix(a.w, b.w, t);
+        }
+    }
+    return 1.0;
+}
+
 @fragment
 fn fs_main(input: VOut) -> @location(0) vec4<f32> {
     // Texture hardware decodes sRGB to linear. Shader controls are truly GPU-side.
     var rgb = textureSample(tex, samp, input.uv).rgb;
+    if (ctl.p1.z > 0.5) {
+        let calibrated = vec3<f32>(calibrated_channel(rgb.r, 0u), calibrated_channel(rgb.g, 1u), calibrated_channel(rgb.b, 2u));
+        rgb = clamp(vec3<f32>(dot(ctl.matrix[0].xyz, calibrated), dot(ctl.matrix[1].xyz, calibrated),
+            dot(ctl.matrix[2].xyz, calibrated)), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     rgb = rgb * exp2(ctl.p0.x);
 
     let luma = max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0);

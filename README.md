@@ -177,6 +177,82 @@ Unavailable configuration paths produce an error. Concurrent saves use the last 
 [Color verification](COLOR-VERIFICATION.md) records ranges, persistence checks, and RX 6600 offscreen rendering results.
 Combined-panel software checks pass. Natural-color acceptance still needs NanoKVM reference images and hardware calibration.
 
+## Automatic color calibration
+
+Open **Color → Auto calibration** and enter one **SSH host**, such as `user@host` or an SSH config alias.
+The initial workflow targets an SDR/sRGB Arch Linux GNOME Wayland desktop.
+It generates its own known RGB test chart; a remote screenshot tool is unnecessary.
+
+On the remote machine, install the tools and configure an SSH server:
+
+```sh
+sudo pacman -S --needed openssh mpv
+```
+
+The viewer machine needs the system `ssh` client. Configure key/agent authentication and verify the remote host
+in a terminal first. Calibration uses non-interactive login and strict host-key checking.
+An SSH config alias can supply the user, port, identity and jump host.
+The application stores no SSH password and never installs packages automatically.
+
+For example, add this entry to `~/.ssh/config` on the viewer machine:
+
+```sshconfig
+Host nano-kvm
+    HostName kvm.example.net
+    User your-user
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+```
+
+Run `ssh nano-kvm` once and verify the host key through your usual SSH process.
+Then enter `nano-kvm` in the **SSH host** field.
+
+Log into the remote GNOME desktop as the SSH user. Select **Auto calibrate** to save the host and start.
+The app detects the Wayland session and active GNOME outputs using the remote systemd tools, `systemctl` and `busctl`.
+It tries those outputs in turn until NanoKVM captures the matching test chart.
+No display socket, connector name, upload command or remote command is required in the UI.
+The SSH session launches mpv inside that existing desktop, using `/run/user/<remote uid>`.
+If several Wayland sockets exist without a session selected by systemd, discovery stops with setup guidance.
+
+Disable HDR, Night Light and automatic device color/exposure controls before calibration.
+Use a full-screen, uncropped output with the same aspect ratio as the captured video.
+Close overlays and keep the remote pointer away from the chart.
+
+Calibration performs these steps without blocking the UI:
+
+1. Discover the remote desktop and transfer a generated PNG through SSH to full-screen mpv.
+2. Try each active output, verify its fresh chart markers, and collect five stable decoded video frames.
+3. Measure patch centers, fit per-channel gray curves and a linear RGB matrix, and evaluate separate validation colors.
+4. Save and apply the correction only after validation and a successful atomic profile write.
+5. Close only the test player started by this run and remove its temporary chart.
+
+The status reports RGB RMSE on a 0–255 scale, before and after calibration with neutral manual GPU controls.
+This is a numerical RGB metric, not a perceptual Delta E or a monitor measurement.
+Validation requires at least 10% improvement and an error no higher than 8.
+An existing correction with error at or below 1 is retained as already accurate.
+Clipped/non-monotonic gray ramps, insufficient color information, wrong charts and unstable frames fail without replacing the correction.
+
+Remote keyboard/mouse input and screenshot actions stay disabled during calibration.
+Manual GPU and device controls also stay disabled until it finishes.
+**Cancel calibration**, disconnect and app exit stop the job without applying a late result.
+The local operation has a 35-second deadline. A remote 45-second watchdog, with a two-second kill grace,
+bounds the test window when a broken network prevents immediate cleanup.
+Remote login, missing mpv and session errors appear in the calibration panel with setup guidance.
+
+`calibration.json`, beside `colors.json`, stores the profile, validated correction and manual GPU preferences.
+After successful calibration, manual GPU controls start neutral and are saved in this profile.
+Subsequent **Save preset** actions save those manual preferences and the calibration enable switch together.
+Existing `colors.json` files remain readable; their values are used until a calibrated profile supplies manual preferences.
+**Use saved calibration** enables/bypasses the correction. **Reset 1:1** also bypasses it until re-enabled or recalibrated.
+Saved corrections require a matching SSH host, video node, resolution and last-read device controls.
+Changing those values bypasses the correction. Use **Refresh device controls** after external device edits.
+Remote display/color changes are not observable over this interface and require explicit recalibration.
+
+Calibration runs before the manual GPU controls. PNG/WebP exports still contain decoded capture pixels before GPU processing.
+MJPG compression and chroma subsampling limit recoverable detail; patch averaging cannot restore lost information.
+This workflow corrects the source-to-capture path, including remote desktop processing, and does not calibrate the physical monitor.
+See [calibration verification](CALIBRATION-VERIFICATION.md) for software checks and hardware limits.
+
 ## Troubleshooting and validation
 
 | Symptom | Action or limitation |
@@ -217,6 +293,7 @@ Recheck the pinned egui-winit patch before upgrading egui/eframe.
 | [capture.rs](src/capture.rs) | V4L2 MJPEG capture and decoding |
 | [screenshot.rs](src/screenshot.rs) | Native-frame PNG/WebP export and exclusive file creation |
 | [gpu.rs](src/gpu.rs), [color.wgsl](src/color.wgsl) | Texture upload, rendering, and GPU color processing |
+| [calibration.rs](src/calibration.rs) | Calibration profile, SSH chart display, sampling, fitting and validation |
 | [input.rs](src/input.rs) | Keyboard mapping, modifiers, and image coordinates |
 | [protocol.rs](src/protocol.rs) | Serial framing and HID reports |
 | [serial.rs](src/serial.rs) | Serial worker and report queue |

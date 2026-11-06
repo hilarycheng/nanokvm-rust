@@ -4,6 +4,7 @@ use std::{borrow::Cow, fs, io::{self, Write}, path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use egui_wgpu::{wgpu, CallbackResources, CallbackTrait};
 use crate::capture::RgbaFrame;
+use crate::calibration::{Correction, KNOTS};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColorSettings {
@@ -22,7 +23,7 @@ impl Default for ColorSettings {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
-struct Uniforms { p0: [f32; 4], p1: [f32; 4] }
+struct Uniforms { p0: [f32; 4], p1: [f32; 4], matrix: [[f32; 4]; 3], knots: [[f32; 4]; KNOTS] }
 
 impl ColorSettings {
     pub const EXPOSURE: std::ops::RangeInclusive<f32> = -2.0..=2.0;
@@ -32,7 +33,7 @@ impl ColorSettings {
     pub const SATURATION: std::ops::RangeInclusive<f32> = 0.0..=1.5;
     pub const SOFT_WHITE: Self = Self { exposure: 0.0, gamma: 1.0, highlights: 0.0, white: 0.84, saturation: 1.0 };
 
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         for (name, value, range) in [
             ("Exposure", self.exposure, Self::EXPOSURE),
             ("Gamma", self.gamma, Self::GAMMA),
@@ -58,28 +59,33 @@ impl ColorSettings {
 
     pub fn save(self, path: &Path) -> Result<()> {
         self.validate()?;
-        let data = serde_json::to_vec_pretty(&self)?;
-        let parent = path.parent().context("GPU preset has no parent directory")?;
-        fs::create_dir_all(parent).context("Create GPU preset directory")?;
-        let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        let mut file = fs::OpenOptions::new().write(true).create_new(true)
-            .open(&temporary).context("Create temporary GPU preset")?;
-        // Replace only after the complete new preset is safely written.
-        let result = (|| -> io::Result<()> {
-            file.write_all(&data)?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() { let _ = fs::remove_file(&temporary); }
-        result.context("Replace GPU preset")
+        atomic_write(path, &serde_json::to_vec_pretty(&self)?)
     }
 
-    fn uniforms(self, target_is_srgb: bool) -> Uniforms {
+    fn uniforms(self, target_is_srgb: bool, correction: Correction) -> Uniforms {
         Uniforms {
             p0: [self.exposure, self.gamma, self.highlights, self.white],
-            p1: [self.saturation, if target_is_srgb { 1.0 } else { 0.0 }, 0.0, 0.0],
+            p1: [self.saturation, if target_is_srgb { 1.0 } else { 0.0 }, if correction == Correction::default() { 0.0 } else { 1.0 }, 0.0],
+            matrix: correction.matrix,
+            knots: correction.knots,
         }
     }
+}
+
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = path.parent().context("GPU preset has no parent directory")?;
+    fs::create_dir_all(parent).context("Create GPU preset directory")?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true)
+        .open(&temporary).context("Create temporary GPU preset")?;
+    // Replace only after the complete new preset is safely written.
+    let result = (|| -> io::Result<()> {
+        file.write_all(data)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result.context("Replace GPU preset")
 }
 
 pub struct GpuVideo {
@@ -209,7 +215,7 @@ impl GpuVideo {
         Self { pipeline, layout, sampler, uniform, texture, group, size: (1, 1), target_is_srgb: target.is_srgb() }
     }
 
-    fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, img: Option<&RgbaFrame>, settings: ColorSettings) {
+    fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, img: Option<&RgbaFrame>, settings: ColorSettings, correction: Correction) {
         if let Some(img) = img {
             if self.size != (img.width, img.height) {
                 self.texture = create_video_texture(device, img.width, img.height);
@@ -232,7 +238,7 @@ impl GpuVideo {
                 wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
             );
         }
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&settings.uniforms(self.target_is_srgb)));
+        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&settings.uniforms(self.target_is_srgb, correction)));
     }
 
     fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
@@ -246,6 +252,7 @@ impl GpuVideo {
 pub struct VideoCallback {
     pub frame: Option<Arc<RgbaFrame>>,
     pub settings: ColorSettings,
+    pub correction: Correction,
 }
 
 impl CallbackTrait for VideoCallback {
@@ -258,7 +265,7 @@ impl CallbackTrait for VideoCallback {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(renderer) = resources.get_mut::<GpuVideo>() {
-            renderer.prepare(device, queue, self.frame.as_deref(), self.settings);
+            renderer.prepare(device, queue, self.frame.as_deref(), self.settings, self.correction);
         }
         Vec::new()
     }
@@ -416,7 +423,7 @@ mod tests {
         let close = |actual: u8, expected: u8| assert!(actual.abs_diff(expected) <= 2, "{actual} != {expected}");
         for format in [wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Rgba8Unorm] {
             let mut renderer = GpuVideo::new(&device, format);
-            renderer.prepare(&device, &queue, Some(&frame), ColorSettings::default());
+            renderer.prepare(&device, &queue, Some(&frame), ColorSettings::default(), Correction::default());
             let output = render(&renderer, &device, &queue, format);
             for (&actual, &expected) in output.iter().zip(&frame.rgba) { close(actual, expected); }
             for (settings, gray, white) in [
@@ -428,7 +435,7 @@ mod tests {
                 (ColorSettings { saturation: 0.0, ..Default::default() }, 128, 255),
             ] {
                 // Controls must update the retained texture even without another captured frame.
-                renderer.prepare(&device, &queue, None, settings);
+                renderer.prepare(&device, &queue, None, settings, Correction::default());
                 let output = render(&renderer, &device, &queue, format);
                 for channel in 0..3 { close(output[4 + channel], gray); close(output[8 + channel], white); }
                 assert_eq!(&output[..4], &[0, 0, 0, 255]);
@@ -438,12 +445,22 @@ mod tests {
                     assert!(output.chunks_exact(4).all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2]));
                 }
             }
-            renderer.prepare(&device, &queue, Some(&RgbaFrame { width: 1, height: 1, rgba: vec![128,128,128,255] }), ColorSettings::default());
+            renderer.prepare(&device, &queue, Some(&RgbaFrame { width: 1, height: 1, rgba: vec![128,128,128,255] }), ColorSettings::default(), Correction::default());
             let output = render(&renderer, &device, &queue, format);
             for pixel in output.chunks_exact(4) { for channel in &pixel[..3] { close(*channel, 128); } }
-            renderer.prepare(&device, &queue, Some(&frame), ColorSettings::default());
+            renderer.prepare(&device, &queue, Some(&frame), ColorSettings::default(), Correction::default());
             let reset = render(&renderer, &device, &queue, format);
             for (&actual, &expected) in reset.iter().zip(&frame.rgba) { close(actual, expected); }
+            let mut correction = Correction::default();
+            for knot in &mut correction.knots { knot[3] = knot[3].powf(0.85); }
+            correction.matrix = [[0.90, 0.05, 0.02, 0.0], [0.02, 0.95, 0.01, 0.0], [0.01, 0.03, 0.92, 0.0]];
+            correction.validate().unwrap();
+            renderer.prepare(&device, &queue, None, ColorSettings::default(), correction);
+            let calibrated = render(&renderer, &device, &queue, format);
+            for (source, output) in frame.rgba.chunks_exact(4).zip(calibrated.chunks_exact(4)) {
+                let expected = correction.apply([source[0], source[1], source[2]].map(|v| v as f32 / 255.0));
+                for c in 0..3 { close(output[c], (expected[c] * 255.0).round() as u8); }
+            }
         }
     }
 }
